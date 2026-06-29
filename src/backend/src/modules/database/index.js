@@ -17,6 +17,42 @@
 
 import { defineModule } from '../base.js';
 
+// ── Modello di accesso multi-audience ────────────────────────────────────────
+const AUDIENCES = ['admin', 'users', 'selected', 'external'];
+
+function legacyToAccess(level) {
+  switch (level) {
+    case 'admin_users':    return [{ audience: 'admin', permission: 'write' }, { audience: 'users', permission: 'read' }];
+    case 'admin_selected': return [{ audience: 'admin', permission: 'write' }, { audience: 'selected', permission: 'read' }];
+    default:               return [{ audience: 'admin', permission: 'write' }];
+  }
+}
+
+function getAccess(obj) {
+  if (Array.isArray(obj?.access) && obj.access.length) return obj.access.filter(a => a && AUDIENCES.includes(a.audience));
+  return legacyToAccess(obj?.accessLevel);
+}
+
+// L'AI è "esterna" quando opera in una sessione widget / canale esterno (non la chat interna).
+function isExternalCtx(ctx) {
+  return !!ctx?.externalChatId || (!!ctx?.source && ctx.source !== 'CHAT');
+}
+
+/** Permesso dell'esterno su un oggetto: 'write' | 'read' | null. */
+function externalPermission(obj) {
+  let best = null;
+  for (const a of getAccess(obj)) {
+    if (a.audience !== 'external') continue;
+    if (a.permission === 'write') return 'write';
+    best = best || 'read';
+  }
+  return best;
+}
+
+/** Filtra/limita l'accesso quando la sessione è esterna; internamente l'AI vede tutto. */
+function externalCanRead(ctx, obj)  { return !isExternalCtx(ctx) || externalPermission(obj) != null; }
+function externalCanWrite(ctx, obj) { return !isExternalCtx(ctx) || externalPermission(obj) === 'write'; }
+
 // ── Validazione di un valore rispetto a un campo ─────────────────────────────
 function validateField(field, value) {
   if (value === undefined || value === null || value === '') {
@@ -176,7 +212,8 @@ export default defineModule({
           take: 200, // filtriamo in memoria per ricerca full-text
         });
 
-        // L'AI accede come super admin — vede tutti i record indipendentemente dall'accessLevel
+        // Internamente l'AI vede tutti i record; in sessione esterna solo quelli con accesso 'external'.
+        records = records.filter(r => externalCanRead(ctx, r));
 
         // Filtra per query generica
         if (args.query?.trim()) {
@@ -226,6 +263,7 @@ export default defineModule({
           include: { schema: true },
         });
         if (!record) return { ok: false, message: 'Record non trovato.' };
+        if (!externalCanRead(ctx, record)) return { ok: false, message: 'Record non accessibile.' };
         return {
           ok: true,
           schema: record.schema.name,
@@ -276,17 +314,27 @@ export default defineModule({
           if (field) normalizedData[field.id || field.name] = val;
         }
 
+        // In sessione esterna, consenti la creazione solo se gli esterni hanno permesso di scrittura sul database.
+        if (!externalCanWrite(ctx, schema)) {
+          return { ok: false, message: 'Non hai il permesso di creare record in questo database.' };
+        }
+
         // Validazione
         const errors = validateRecord(fields, normalizedData);
         if (errors.length) return { ok: false, message: errors.join(' | ') };
+
+        const defaultAccess = (Array.isArray(schema.defaultRecordAccessList) && schema.defaultRecordAccessList.length)
+          ? schema.defaultRecordAccessList
+          : legacyToAccess(schema.defaultRecordAccess);
 
         const record = await ctx.prisma.dbRecord.create({
           data: {
             schemaId: schema.id,
             tenantId: ctx.tenantId,
             data: normalizedData,
+            access: defaultAccess,
             accessLevel: schema.defaultRecordAccess || 'admin',
-            accessUsers: [],
+            accessUsers: Array.isArray(schema.accessUsers) ? schema.accessUsers : [],
           },
         });
 
@@ -326,6 +374,7 @@ export default defineModule({
           include: { schema: true },
         });
         if (!record) return { ok: false, message: 'Record non trovato.' };
+        if (!externalCanWrite(ctx, record)) return { ok: false, message: 'Non hai il permesso di modificare questo record.' };
 
         const fields = record.schema.fields || [];
 
@@ -379,6 +428,7 @@ export default defineModule({
           include: { schema: { select: { name: true } } },
         });
         if (!record) return { ok: false, message: 'Record non trovato.' };
+        if (!externalCanWrite(ctx, record)) return { ok: false, message: 'Non hai il permesso di eliminare questo record.' };
 
         await ctx.prisma.dbRecord.delete({ where: { id: record.id } });
         return { ok: true, message: `Record eliminato dal database "${record.schema.name}".` };
@@ -431,11 +481,14 @@ export default defineModule({
           label: f.label || f.name,
           type: f.type || 'string',
           required: !!f.required,
+          inTable: f.inTable === undefined ? true : !!f.inTable,
           ...(f.regex   ? { regex: f.regex }     : {}),
           ...(f.min !== undefined ? { min: f.min } : {}),
           ...(f.max !== undefined ? { max: f.max } : {}),
           ...(f.options ? { options: f.options } : {}),
         }));
+
+        const defaultAccess = [{ audience: 'admin', permission: 'write' }];
 
         const schema = await ctx.prisma.dbSchema.create({
           data: {
@@ -444,6 +497,10 @@ export default defineModule({
             description: args.description || '',
             icon: args.icon || 'server-outline',
             showInSidebar: !!args.showInSidebar,
+            access: defaultAccess,
+            defaultRecordAccessList: defaultAccess,
+            accessLevel: 'admin',
+            defaultRecordAccess: 'admin',
             fields,
           },
         });

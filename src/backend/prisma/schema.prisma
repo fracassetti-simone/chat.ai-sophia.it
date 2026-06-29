@@ -394,7 +394,7 @@ model WhatsAppContact {
 
 // ─────────────────────────────────────────────────────────────
 // Collegamento numero di telefono utente (OTP via ai-sophia)
-// ─────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────���─────
 
 model UserPhoneLink {
   id          String   @id @default(cuid())
@@ -981,11 +981,17 @@ model DbSchema {
   icon               String   @default("server-outline") // nome icona Ionicons
   showInSidebar      Boolean  @default(false)   // se true → appare in sidebar come voce "Dati"
   description        String   @default("")
-  // Accesso al database intero: admin | admin_users | admin_selected
+  // [LEGACY] Accesso al database intero: admin | admin_users | admin_selected
   accessLevel        String   @default("admin")
-  // Valore predefinito dell'accessibilità per i nuovi record di questo database
+  // [LEGACY] Valore predefinito dell'accessibilità per i nuovi record di questo database
   defaultRecordAccess String  @default("admin")
-  // fields: array JSON di { id, name, label, type, required, regex?, min?, max?, options? }
+  // Modello multi-audience: array JSON di { audience: 'admin'|'users'|'selected'|'external', permission: 'read'|'write' }
+  access             Json     @default("[]")
+  // Accesso predefinito dei nuovi record (stesso formato di access)
+  defaultRecordAccessList Json @default("[]")
+  // Lista di userId selezionati (usata quando access include audience 'selected')
+  accessUsers        Json     @default("[]")
+  // fields: array JSON di { id, name, label, type, required, regex?, min?, max?, options?, inTable? }
   fields             Json     @default("[]")
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
@@ -1002,9 +1008,11 @@ model DbRecord {
   tenantId    String
   // data: oggetto JSON con i valori dei campi { fieldId: value }
   data        Json     @default("{}")
-  // Accessibilità del singolo record: admin | admin_users | admin_selected
+  // [LEGACY] Accessibilità del singolo record: admin | admin_users | admin_selected
   accessLevel String   @default("admin")
-  // Lista di userId selezionati (solo se accessLevel = admin_selected)
+  // Modello multi-audience: array JSON di { audience, permission }
+  access      Json     @default("[]")
+  // Lista di userId selezionati (usata quando access include audience 'selected')
   accessUsers Json     @default("[]")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
