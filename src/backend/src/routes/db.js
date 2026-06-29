@@ -455,7 +455,7 @@ router.get('/users', asyncHandler(async (req, res) => {
   await assertModuleActive(req);
   if (!isAdmin(req)) throw forbidden('Permesso negato');
   const users = await prisma.user.findMany({
-    where: { tenants: { some: { id: req.tenantId } } },
+    where: { tenantId: req.tenantId },
     select: { id: true, name: true, email: true, role: true },
     orderBy: { name: 'asc' },
   });
