@@ -232,6 +232,7 @@ router.post(
         history,
         onToken: (delta) => send('token', { delta }),
         onToolCall: (call) => send('tool', call),
+        onToolResult: (res) => send('tool_result', res),
       });
 
       await prisma.message.create({

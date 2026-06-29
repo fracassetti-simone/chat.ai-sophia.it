@@ -69,11 +69,31 @@ router.post('/:conversationId/apply', requirePermission(PERMISSIONS.TRAINING_MAN
 
   const { learning, field } = applySchema.parse(req.body);
 
-  const current = await prisma.trainingConfig.upsert({
-    where: { tenantId: req.tenantId },
-    update: {},
-    create: { tenantId: req.tenantId },
+  // Risolve l'agente attivo per questa conversazione (stessa logica della chat):
+  // agente assegnato alla conversazione > agente predefinito del tenant > TrainingConfig legacy.
+  const convAgent = await prisma.conversationAgent.findUnique({
+    where: { conversationId: req.params.conversationId },
+    select: { agentId: true },
   });
+  let agent = null;
+  if (convAgent?.agentId) {
+    agent = await prisma.agent.findFirst({ where: { id: convAgent.agentId, tenantId: req.tenantId } });
+  }
+  if (!agent) {
+    agent = await prisma.agent.findFirst({ where: { tenantId: req.tenantId, isDefault: true } });
+  }
+
+  // Sorgente del prompt esistente: l'agente se presente, altrimenti la config legacy.
+  let current;
+  if (!agent) {
+    current = await prisma.trainingConfig.upsert({
+      where: { tenantId: req.tenantId },
+      update: {},
+      create: { tenantId: req.tenantId },
+    });
+  } else {
+    current = agent;
+  }
 
   const existingPrompt = current[field] || '';
 
@@ -108,12 +128,36 @@ REGOLE:
     updatedPrompt = existingPrompt ? `${existingPrompt}\n\n${learning}` : learning;
   }
 
-  await prisma.trainingConfig.update({
-    where: { tenantId: req.tenantId },
-    data: { [field]: updatedPrompt },
-  });
+  if (agent) {
+    // Salva una versione dell'agente prima della modifica, poi aggiorna il campo.
+    try {
+      await prisma.agentVersion.create({
+        data: {
+          agentId: agent.id, tenantId: req.tenantId, savedBy: req.user?.id || null,
+          note: 'Aggiornamento da chat di addestramento',
+          mainPrompt: agent.mainPrompt, personality: agent.personality,
+          rules: agent.rules, context: agent.context, instructions: agent.instructions,
+        },
+      });
+      const count = await prisma.agentVersion.count({ where: { agentId: agent.id } });
+      if (count > 50) {
+        const oldest = await prisma.agentVersion.findFirst({ where: { agentId: agent.id }, orderBy: { createdAt: 'asc' }, select: { id: true } });
+        if (oldest) await prisma.agentVersion.delete({ where: { id: oldest.id } });
+      }
+    } catch { /* lo snapshot non deve bloccare l'applicazione */ }
 
-  res.json({ ok: true, updatedPrompt, field });
+    await prisma.agent.update({
+      where: { id: agent.id },
+      data: { [field]: updatedPrompt },
+    });
+  } else {
+    await prisma.trainingConfig.update({
+      where: { tenantId: req.tenantId },
+      data: { [field]: updatedPrompt },
+    });
+  }
+
+  res.json({ ok: true, updatedPrompt, field, agentId: agent?.id || null, agentName: agent?.name || null });
 }));
 
 export default router;

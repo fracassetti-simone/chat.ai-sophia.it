@@ -3,12 +3,86 @@ import multer from 'multer';
 import { z } from 'zod';
 import { prisma } from '../db/prisma.js';
 import { config } from '../config/index.js';
-import { asyncHandler, badRequest, notFound } from '../utils/http.js';
+import { asyncHandler, badRequest, notFound, forbidden } from '../utils/http.js';
 import { authenticate, tenantScope, requireTenant } from '../middleware/auth.js';
 import { extractText } from '../services/extract.js';
 
 const router = Router();
 router.use(authenticate, tenantScope, requireTenant);
+
+// ── Modello di accesso multi-audience (allineato a routes/db.js) ──────────────
+const AUDIENCES   = ['admin', 'users', 'selected', 'external'];
+const PERMISSIONS = ['read', 'write'];
+
+function isSuperAdmin(req) { return req.user?.role === 'SUPER_ADMIN'; }
+function isAdmin(req)      { return req.user?.role === 'ADMIN' || isSuperAdmin(req); }
+
+/** Pulisce/normalizza un array di accesso ricevuto dal client.
+ *  Forza sempre la presenza degli admin in scrittura (requisito: gli admin devono avere accesso). */
+function normalizeAccess(raw) {
+  const seen = new Set();
+  const out = [];
+  if (Array.isArray(raw)) {
+    for (const a of raw) {
+      if (!a || !AUDIENCES.includes(a.audience) || seen.has(a.audience)) continue;
+      seen.add(a.audience);
+      out.push({ audience: a.audience, permission: PERMISSIONS.includes(a.permission) ? a.permission : 'read' });
+    }
+  }
+  // Gli admin hanno SEMPRE accesso completo.
+  if (!seen.has('admin')) out.unshift({ audience: 'admin', permission: 'write' });
+  else {
+    const adm = out.find(a => a.audience === 'admin');
+    adm.permission = 'write';
+  }
+  return out;
+}
+
+/** Array di accesso effettivo. Vuoto/legacy → accessibile a tutti gli utenti del tenant. */
+function getAccess(folder) {
+  if (Array.isArray(folder?.access) && folder.access.length) {
+    return folder.access.filter(a => a && AUDIENCES.includes(a.audience));
+  }
+  // Default retro-compatibile: cartelle senza modello di accesso sono visibili a tutti.
+  return [{ audience: 'admin', permission: 'write' }, { audience: 'users', permission: 'write' }];
+}
+
+function userAudiences(req) {
+  if (req.user?.role === 'ADMIN') return ['admin', 'users'];
+  return ['users'];
+}
+
+/** Permesso dell'utente su una cartella: 'write' | 'read' | null. Super admin → 'write'. */
+function permissionFor(req, folder) {
+  if (isSuperAdmin(req)) return 'write';
+  // Le cartelle-contatto restano gestibili dagli utenti come prima (nessuna restrizione extra).
+  const access = getAccess(folder);
+  const auds = userAudiences(req);
+  const selUsers = Array.isArray(folder?.accessUsers) ? folder.accessUsers : [];
+  let best = null;
+  for (const a of access) {
+    let match = false;
+    if (a.audience === 'selected') match = selUsers.includes(req.user.id);
+    else if (a.audience === 'external') match = false;
+    else match = auds.includes(a.audience);
+    if (!match) continue;
+    if (a.permission === 'write') return 'write';
+    best = best || 'read';
+  }
+  return best;
+}
+
+function canSee(req, folder)   { return permissionFor(req, folder) != null; }
+function canWrite(req, folder) { return permissionFor(req, folder) === 'write'; }
+
+/** Carica una cartella e verifica l'accesso. Lancia 404/403 dove serve. */
+async function loadFolder(req, id, { write = false } = {}) {
+  const folder = await prisma.cloudFolder.findFirst({ where: { id, tenantId: req.tenantId } });
+  if (!folder) throw notFound('Cartella non trovata');
+  if (!canSee(req, folder)) throw forbidden('Non hai accesso a questa cartella.');
+  if (write && !canWrite(req, folder)) throw forbidden('Non hai il permesso di modificare questa cartella.');
+  return folder;
+}
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -61,8 +135,7 @@ router.get('/', asyncHandler(async (req, res) => {
 
   let current = null;
   if (folderId) {
-    current = await prisma.cloudFolder.findFirst({ where: { id: folderId, tenantId: req.tenantId } });
-    if (!current) throw notFound('Cartella non trovata');
+    current = await loadFolder(req, folderId);
   }
 
   // Determina la where clause per i documenti.
@@ -80,7 +153,7 @@ router.get('/', asyncHandler(async (req, res) => {
     prisma.cloudFolder.findMany({
       where: { tenantId: req.tenantId, parentId: folderId },
       orderBy: { name: 'asc' },
-      select: { id: true, name: true, contactId: true, _count: { select: { documents: true, children: true } } },
+      select: { id: true, name: true, contactId: true, access: true, accessUsers: true, _count: { select: { documents: true, children: true } } },
     }),
     prisma.document.findMany({
       where: docWhere,
@@ -89,45 +162,72 @@ router.get('/', asyncHandler(async (req, res) => {
   ]);
 
   res.json({
-    folder: current ? { id: current.id, name: current.name, contactId: current.contactId } : null,
+    folder: current ? { id: current.id, name: current.name, contactId: current.contactId, access: getAccess(current), accessUsers: current.accessUsers || [], canWrite: canWrite(req, current) } : null,
     breadcrumb: folderId ? await breadcrumb(req.tenantId, folderId) : [],
-    folders: folders.map((f) => ({
+    // Mostra solo le sottocartelle a cui l'utente ha accesso.
+    folders: folders.filter((f) => canSee(req, f)).map((f) => ({
       id: f.id, name: f.name, isContact: !!f.contactId,
       itemCount: f._count.documents + f._count.children,
+      access: getAccess(f), accessUsers: f.accessUsers || [], canWrite: canWrite(req, f),
     })),
     files: files.map((d) => fileView(req, d)),
   });
 }));
 
 // ── POST /api/cloud/folders ───────────────────────────────────────────────
-const folderSchema = z.object({ name: z.string().trim().min(1).max(120), parentId: z.string().optional().nullable() });
+const accessSchema = z.array(z.object({
+  audience: z.enum(['admin', 'users', 'selected', 'external']),
+  permission: z.enum(['read', 'write']).optional(),
+})).optional();
+const folderSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  parentId: z.string().optional().nullable(),
+  access: accessSchema,
+  accessUsers: z.array(z.string()).optional(),
+});
 router.post('/folders', asyncHandler(async (req, res) => {
-  const { name, parentId } = folderSchema.parse(req.body || {});
+  const { name, parentId, access, accessUsers } = folderSchema.parse(req.body || {});
   if (parentId) {
-    const parent = await prisma.cloudFolder.findFirst({ where: { id: parentId, tenantId: req.tenantId } });
-    if (!parent) throw badRequest('Cartella superiore non valida.');
+    const parent = await loadFolder(req, parentId, { write: true });
+    void parent;
   }
+  const norm = normalizeAccess(access);
+  const hasSelected = norm.some(a => a.audience === 'selected');
   const folder = await prisma.cloudFolder.create({
-    data: { tenantId: req.tenantId, name, parentId: parentId || null },
+    data: {
+      tenantId: req.tenantId, name, parentId: parentId || null,
+      access: norm,
+      accessUsers: hasSelected ? (accessUsers || []) : [],
+    },
   });
-  res.status(201).json({ folder: { id: folder.id, name: folder.name, isContact: false, itemCount: 0 } });
+  res.status(201).json({ folder: { id: folder.id, name: folder.name, isContact: false, itemCount: 0, access: getAccess(folder), accessUsers: folder.accessUsers || [], canWrite: true } });
 }));
 
 // ── PATCH /api/cloud/folders/:id ─────────────────────────────────────────
+const folderPatchSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  access: accessSchema,
+  accessUsers: z.array(z.string()).optional(),
+});
 router.patch('/folders/:id', asyncHandler(async (req, res) => {
-  const name = z.string().trim().min(1).max(120).parse(req.body?.name);
-  const { count } = await prisma.cloudFolder.updateMany({
-    where: { id: req.params.id, tenantId: req.tenantId },
-    data: { name },
-  });
-  if (!count) throw notFound('Cartella non trovata');
+  await loadFolder(req, req.params.id, { write: true });
+  const body = folderPatchSchema.parse(req.body || {});
+  const data = {};
+  if (typeof body.name === 'string') data.name = body.name;
+  if (body.access !== undefined) {
+    const norm = normalizeAccess(body.access);
+    data.access = norm;
+    data.accessUsers = norm.some(a => a.audience === 'selected') ? (body.accessUsers || []) : [];
+  } else if (body.accessUsers !== undefined) {
+    data.accessUsers = body.accessUsers;
+  }
+  await prisma.cloudFolder.update({ where: { id: req.params.id }, data });
   res.json({ ok: true });
 }));
 
 // ── DELETE /api/cloud/folders/:id ────────────────────────────────────────
 router.delete('/folders/:id', asyncHandler(async (req, res) => {
-  const root = await prisma.cloudFolder.findFirst({ where: { id: req.params.id, tenantId: req.tenantId } });
-  if (!root) throw notFound('Cartella non trovata');
+  const root = await loadFolder(req, req.params.id, { write: true });
 
   const ids = [];
   let frontier = [root.id];
@@ -163,8 +263,7 @@ router.post(
     if (!Array.isArray(tags)) tags = [];
 
     if (folderId) {
-      const folder = await prisma.cloudFolder.findFirst({ where: { id: folderId, tenantId: req.tenantId }, select: { id: true, contactId: true } });
-      if (!folder) throw badRequest('Cartella non valida.');
+      const folder = await loadFolder(req, folderId, { write: true });
       if (!contactId && folder.contactId) contactId = folder.contactId;
     }
 
@@ -225,8 +324,7 @@ router.patch('/files/:id', asyncHandler(async (req, res) => {
   if ('folderId' in req.body) {
     const fid = (req.body.folderId || '').toString().trim() || null;
     if (fid) {
-      const folder = await prisma.cloudFolder.findFirst({ where: { id: fid, tenantId: req.tenantId } });
-      if (!folder) throw badRequest('Cartella di destinazione non valida.');
+      await loadFolder(req, fid, { write: true });
     }
     // Raw SQL per bypassare il problema di versione client
     await prisma.$executeRawUnsafe(
@@ -260,7 +358,38 @@ router.get('/search', asyncHandler(async (req, res) => {
     orderBy: { createdAt: 'desc' },
     take: 50,
   });
-  res.json({ files: files.map((d) => fileView(req, d)) });
+
+  // Filtra i risultati: nascondi i file che si trovano in cartelle non accessibili.
+  let visible = files;
+  if (!isSuperAdmin(req)) {
+    const folderIds = [...new Set(files.map((d) => d.folderId).filter(Boolean))];
+    const accessById = new Map();
+    if (folderIds.length) {
+      const folders = await prisma.cloudFolder.findMany({
+        where: { tenantId: req.tenantId, id: { in: folderIds } },
+        select: { id: true, access: true, accessUsers: true, contactId: true },
+      });
+      for (const f of folders) accessById.set(f.id, f);
+    }
+    visible = files.filter((d) => {
+      if (!d.folderId) return true; // file nella root: visibile
+      const f = accessById.get(d.folderId);
+      return f ? canSee(req, f) : true;
+    });
+  }
+
+  res.json({ files: visible.map((d) => fileView(req, d)) });
+}));
+
+// ── GET /api/cloud/users (lista utenti del tenant per audience "Utenti specifici") ──
+router.get('/users', asyncHandler(async (req, res) => {
+  if (!isAdmin(req)) throw forbidden('Permesso negato');
+  const users = await prisma.user.findMany({
+    where: { tenantId: req.tenantId },
+    select: { id: true, name: true, email: true, role: true },
+    orderBy: { name: 'asc' },
+  });
+  res.json({ users });
 }));
 
 // ── POST /api/cloud/contact/:contactId/folder ─────────────────────────────

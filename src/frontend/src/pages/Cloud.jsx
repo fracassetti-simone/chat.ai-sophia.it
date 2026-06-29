@@ -8,6 +8,7 @@ import {
 import { api, uploadFileWithProgress } from '../lib/api.js';
 import { useToast } from '../context/ToastContext.jsx';
 import { useModal } from '../context/ModalContext.jsx';
+import { FolderAccessModal, AccessBadge } from '../components/AccessControl.jsx';
 
 // ── helpers ────────────────────────────────────────────────────────────────
 function formatSize(b) {
@@ -119,7 +120,11 @@ export default function Cloud() {
   const [ctxMenu, setCtxMenu] = useState(null); // {x,y,items}
   const [movePicker, setMovePicker] = useState(null); // {fileId?}|{folderId?}
   const [dragOver, setDragOver] = useState(null); // folderId being dragged over
+  const [folderModal, setFolderModal] = useState(null); // {mode:'create'|'edit', folder?}
   const fileInput = useRef(null);
+
+  // Permesso di scrittura nella cartella corrente (root = sempre scrivibile).
+  const canWriteHere = folderId ? (data?.folder?.canWrite !== false) : true;
 
   const load = useCallback((id=folderId) => {
     const qs = id ? `?folderId=${encodeURIComponent(id)}` : '';
@@ -149,18 +154,21 @@ export default function Cloud() {
     return () => clearTimeout(t);
   }, [search]);
 
-  const newFolder = async () => {
-    const name = await modal.prompt('Nome della nuova cartella', { title:'Nuova cartella', placeholder:'Es. Fatture 2024' });
-    if (!name?.trim()) return;
-    try { await api('/cloud/folders', { method:'POST', body:{ name:name.trim(), parentId:folderId } }); load(); }
-    catch(err) { toast.error(err.message); }
-  };
+  const newFolder = () => setFolderModal({ mode: 'create' });
 
-  const renameFolder = async (f) => {
-    const name = await modal.prompt('Rinomina cartella', { title:'Rinomina', defaultValue:f.name });
-    if (!name?.trim()||name===f.name) return;
-    try { await api(`/cloud/folders/${f.id}`, { method:'PATCH', body:{ name:name.trim() } }); load(); }
-    catch(err) { toast.error(err.message); }
+  const editFolder = (f) => setFolderModal({ mode: 'edit', folder: f });
+
+  // Salvataggio dal modal (crea o aggiorna nome + accessi).
+  const saveFolder = async ({ name, access, accessUsers }) => {
+    try {
+      if (folderModal?.mode === 'edit') {
+        await api(`/cloud/folders/${folderModal.folder.id}`, { method:'PATCH', body:{ name, access, accessUsers } });
+        toast.info('Cartella aggiornata');
+      } else {
+        await api('/cloud/folders', { method:'POST', body:{ name, parentId:folderId, access, accessUsers } });
+      }
+      load();
+    } catch(err) { toast.error(err.message); throw err; }
   };
 
   const deleteFolder = async (f) => {
@@ -214,12 +222,13 @@ export default function Cloud() {
   // Context menu for folders
   const folderCtx = (e, f) => {
     e.preventDefault(); e.stopPropagation();
-    setCtxMenu({ x:e.clientX, y:e.clientY, items:[
-      { label:'Apri', icon:FolderOpen, onClick:()=>setFolderId(f.id) },
-      { label:'Rinomina', icon:Pencil, onClick:()=>renameFolder(f) },
-      'sep',
-      { label:'Elimina', icon:Trash2, danger:true, onClick:()=>deleteFolder(f) },
-    ]});
+    const items = [{ label:'Apri', icon:FolderOpen, onClick:()=>setFolderId(f.id) }];
+    if (f.canWrite !== false && !f.isContact) {
+      items.push({ label:'Rinomina e permessi', icon:Pencil, onClick:()=>editFolder(f) });
+      items.push('sep');
+      items.push({ label:'Elimina', icon:Trash2, danger:true, onClick:()=>deleteFolder(f) });
+    }
+    setCtxMenu({ x:e.clientX, y:e.clientY, items });
   };
 
   // Context menu for files
@@ -255,8 +264,8 @@ export default function Cloud() {
         <div><h1 className="page-title">Cloud documentale</h1>
           <p className="page-subtitle">Tasto destro su file e cartelle per azioni rapide. Trascina i file sulle cartelle per spostarli.</p></div>
         <div className="cloud-actions">
-          <button className="btn btn-outline" onClick={newFolder}><FolderPlus size={16}/> Nuova cartella</button>
-          <button className="btn btn-primary" onClick={()=>fileInput.current?.click()} disabled={uploading}><Upload size={16}/> {uploading?'Carico…':'Carica file'}</button>
+          <button className="btn btn-outline" onClick={newFolder} disabled={!canWriteHere}><FolderPlus size={16}/> Nuova cartella</button>
+          <button className="btn btn-primary" onClick={()=>fileInput.current?.click()} disabled={uploading||!canWriteHere}><Upload size={16}/> {uploading?'Carico…':'Carica file'}</button>
           <input ref={fileInput} type="file" multiple hidden onChange={onUpload}/>
         </div>
       </div>
@@ -308,10 +317,13 @@ export default function Cloud() {
                    <div className="folder-meta">
                      <span className="folder-name">{f.name}</span>
                      <span className="folder-count">{f.itemCount} element{f.itemCount===1?'o':'i'}</span>
+                     {!f.isContact && f.access && (
+                       <div className="folder-access" style={{marginTop:6}}><AccessBadge access={f.access}/></div>
+                     )}
                    </div>
-                   {!f.isContact && (
+                   {!f.isContact && f.canWrite !== false && (
                      <div className="folder-tools" onClick={e=>e.stopPropagation()}>
-                       <button className="icon-btn-sm" title="Rinomina" onClick={()=>renameFolder(f)}><Pencil size={14}/></button>
+                       <button className="icon-btn-sm" title="Rinomina e permessi" onClick={()=>editFolder(f)}><Pencil size={14}/></button>
                        <button className="icon-btn-sm danger" title="Elimina" onClick={()=>deleteFolder(f)}><Trash2 size={14}/></button>
                      </div>
                    )}
@@ -348,6 +360,16 @@ export default function Cloud() {
           current={folderId}
           onSelect={async (targetId) => { await moveFile(movePicker.fileId, targetId); }}
           onClose={()=>setMovePicker(null)}
+        />
+      )}
+      {folderModal && (
+        <FolderAccessModal
+          title={folderModal.mode === 'edit' ? 'Rinomina e permessi' : 'Nuova cartella'}
+          initialName={folderModal.folder?.name || ''}
+          initialAccess={folderModal.folder?.access}
+          initialAccessUsers={folderModal.folder?.accessUsers || []}
+          onSave={saveFolder}
+          onClose={()=>setFolderModal(null)}
         />
       )}
     </div>

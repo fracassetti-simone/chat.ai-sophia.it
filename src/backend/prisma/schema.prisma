@@ -394,7 +394,7 @@ model WhatsAppContact {
 
 // ─────────────────────────────────────────────────────────────
 // Collegamento numero di telefono utente (OTP via ai-sophia)
-// ───────────────────────────────────────────────────────���─────
+// ───────────────────────────────────────────────────────�����─────
 
 model UserPhoneLink {
   id          String   @id @default(cuid())
@@ -677,6 +677,12 @@ model CloudFolder {
   contactId String?       @unique
   contact   Contact?      @relation(fields: [contactId], references: [id], onDelete: Cascade)
   documents Document[]
+  // Modello di accesso multi-audience: array JSON di { audience, permission }.
+  // audience: 'admin' | 'users' | 'selected' | 'external'  · permission: 'read' | 'write'
+  // Vuoto = legacy → accessibile a tutti gli utenti del tenant.
+  access      Json        @default("[]")
+  // Lista di userId selezionati (usata quando access include audience 'selected').
+  accessUsers Json        @default("[]")
   createdAt DateTime      @default(now())
   updatedAt DateTime      @updatedAt
 

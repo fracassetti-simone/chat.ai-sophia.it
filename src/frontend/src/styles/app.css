@@ -289,7 +289,7 @@
 .gemini-spinner { width: 56px; height: 56px; border: 5px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: _spin 0.9s linear infinite; }
 .gemini-loading p { font-size: 15px; color: var(--text-muted); text-align: center; }
 
-/* ─── Training ───────────────────────────────────────────────────────────── */
+/* ─── Training ─────────────────��─────────────────────────────────────────── */
 .training-docs-list { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
 .training-doc-item  { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
 .training-doc-name  { flex: 1; font-size: 13px; font-weight: 500; }
@@ -501,11 +501,21 @@
 .activity-item-label    { font-size: 12px; font-weight: 500; color: var(--text); line-height: 1.4; flex: 1; }
 .activity-item-meta     { font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 4px; margin-bottom: 8px; }
 .activity-item-actions  { display: flex; gap: 6px; }
-.action-log-item        { display: flex; align-items: flex-start; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--border); }
+.action-log-item        { border-bottom: 1px solid var(--border); }
 .action-log-item:last-child { border-bottom: none; }
+.action-log-head        { display: flex; align-items: flex-start; gap: 8px; padding: 7px 0; width: 100%; background: none; border: none; text-align: left; }
+.action-log-text        { flex: 1; min-width: 0; }
 .action-log-icon  { color: var(--green-600); margin-top: 2px; flex-shrink: 0; }
-.action-log-name  { font-size: 12px; font-weight: 500; line-height: 1.4; }
+.action-log-item.error  .action-log-icon { color: var(--red-600, #dc2626); }
+.action-log-item.running .action-log-icon { color: var(--text-muted); }
+.action-log-icon.spin   { animation: spin 1s linear infinite; }
+.action-log-name  { font-size: 12px; font-weight: 500; line-height: 1.4; word-break: break-word; }
 .action-log-time  { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+.action-log-caret { color: var(--text-muted); margin-top: 3px; flex-shrink: 0; }
+.action-log-detail { padding: 4px 0 10px 20px; display: flex; flex-direction: column; gap: 8px; }
+.action-log-block-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 3px; }
+.action-log-pre   { margin: 0; font-family: var(--font-mono, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; background: var(--gray-50); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; max-height: 240px; overflow: auto; color: var(--text); }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 /* ── OTP / phone modal ── */
 .phone-link-box { display: flex; flex-direction: column; gap: 14px; }

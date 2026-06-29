@@ -127,7 +127,7 @@ export function uploadFileWithProgress(path, file, extra = {}, onProgress) {
 }
 
 // Streaming della risposta AI via Server-Sent Events su una POST.
-export async function streamMessage(conversationId, content, documentIds, { onToken, onTool, onDone, onError }) {
+export async function streamMessage(conversationId, content, documentIds, { onToken, onTool, onToolResult, onDone, onError }) {
   const res = await fetch(`/api/conversations/${conversationId}/messages`, {
     method: 'POST',
     headers: authHeaders({ 'Content-Type': 'application/json' }),
@@ -154,6 +154,7 @@ export async function streamMessage(conversationId, content, documentIds, { onTo
       const payload = JSON.parse(dataLine);
       if (event === 'token') onToken?.(payload.delta);
       else if (event === 'tool') onTool?.(payload);
+      else if (event === 'tool_result') onToolResult?.(payload);
       else if (event === 'done') onDone?.(payload);
       else if (event === 'error') onError?.(new Error(payload.message));
     }
