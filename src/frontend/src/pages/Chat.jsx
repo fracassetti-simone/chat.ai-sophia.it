@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   Plus, Search, Send, Paperclip, Mic, MoreVertical, Trash2, Pencil, X, Loader2,
-  Activity, Clock, CheckCircle2, Pause, Play, ChevronDown, ChevronUp,
+  Activity, Clock, CheckCircle2, Pause, Play, ChevronDown, ChevronUp, ChevronRight,
+  AlertCircle, Loader2 as Spinner,
   MessageCircle, Phone, PhoneOff, FlaskConical, Unlink,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen,
   Download, ExternalLink, FileText,
@@ -28,6 +29,57 @@ function fmtBytes(b) {
   if (b < 1024) return `${b} B`;
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
   return `${(b / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// ── Voce del log azioni AI: espandibile con richiesta + risposta complete ──
+function formatPayload(v) {
+  if (v === undefined || v === null) return '';
+  if (typeof v === 'string') return v;
+  try { return JSON.stringify(v, null, 2); } catch { return String(v); }
+}
+
+function ActionLogItem({ entry }) {
+  const [open, setOpen] = useState(false);
+  const status = entry.status || (entry.ok === false ? 'error' : 'done');
+  const hasDetail = entry.request !== undefined || entry.response !== undefined;
+
+  const StatusIcon = status === 'running' ? Spinner : status === 'error' ? AlertCircle : CheckCircle2;
+  const statusClass = status === 'running' ? 'running' : status === 'error' ? 'error' : 'done';
+
+  return (
+    <div className={`action-log-item ${statusClass}`}>
+      <button
+        type="button"
+        className="action-log-head"
+        onClick={() => hasDetail && setOpen((o) => !o)}
+        style={{ cursor: hasDetail ? 'pointer' : 'default' }}
+        aria-expanded={open}
+      >
+        <StatusIcon size={12} className={`action-log-icon ${status === 'running' ? 'spin' : ''}`} />
+        <div className="action-log-text">
+          <div className="action-log-name">{entry.label || entry.name}</div>
+          <div className="action-log-time">{entry.time}</div>
+        </div>
+        {hasDetail && (open ? <ChevronDown size={13} className="action-log-caret" /> : <ChevronRight size={13} className="action-log-caret" />)}
+      </button>
+      {open && hasDetail && (
+        <div className="action-log-detail">
+          {entry.request !== undefined && (
+            <div className="action-log-block">
+              <div className="action-log-block-label">Richiesta</div>
+              <pre className="action-log-pre">{formatPayload(entry.request) || '—'}</pre>
+            </div>
+          )}
+          {entry.response !== undefined && (
+            <div className="action-log-block">
+              <div className="action-log-block-label">Risposta</div>
+              <pre className="action-log-pre">{formatPayload(entry.response) || '—'}</pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ── Pannello destro: Attività + WhatsApp + Addestramento ──────────────────
@@ -59,12 +111,29 @@ function RightPanel({
   useEffect(() => { load(); }, [load, refreshKey]);
 
   useEffect(() => {
-    const handler = (e) => {
+    const persist = (next) => { try { sessionStorage.setItem('sophia.actionLog', JSON.stringify(next)); } catch {} return next; };
+    // Nuova richiesta AI → aggiunge una voce (eventualmente in stato "running").
+    const onAction = (e) => {
       const entry = e.detail;
-      setActionLog((prev) => { const next = [entry, ...prev].slice(0, 50); sessionStorage.setItem('sophia.actionLog', JSON.stringify(next)); return next; });
+      setActionLog((prev) => persist([entry, ...prev].slice(0, 50)));
     };
-    window.addEventListener('sophia:action', handler);
-    return () => window.removeEventListener('sophia:action', handler);
+    // Esito della richiesta → completa la prima voce "running" con lo stesso nome.
+    const onResult = (e) => {
+      const { name, ok, request, response } = e.detail;
+      setActionLog((prev) => {
+        const idx = prev.findIndex((x) => x.name === name && x.status === 'running');
+        if (idx === -1) return prev;
+        const next = prev.slice();
+        next[idx] = { ...next[idx], status: ok ? 'done' : 'error', ok, request: request ?? next[idx].request, response };
+        return persist(next);
+      });
+    };
+    window.addEventListener('sophia:action', onAction);
+    window.addEventListener('sophia:action-result', onResult);
+    return () => {
+      window.removeEventListener('sophia:action', onAction);
+      window.removeEventListener('sophia:action-result', onResult);
+    };
   }, []);
 
   const toggleTask = async (task) => {
@@ -190,10 +259,7 @@ function RightPanel({
             </div>
             {actionLog.length === 0 && <p className="activity-empty">Nessuna azione registrata.</p>}
             {actionLog.map((entry, i) => (
-              <div key={i} className="action-log-item">
-                <CheckCircle2 size={12} className="action-log-icon" />
-                <div><div className="action-log-name">{entry.label}</div><div className="action-log-time">{entry.time}</div></div>
-              </div>
+              <ActionLogItem key={entry.callId || i} entry={entry} />
             ))}
           </div>
         )}
@@ -346,7 +412,7 @@ function CompilerBanner({ banner, onDismiss }) {
   );
 }
 
-// ── Chat principale ────────────────────────────────────────────────────────
+// ── Chat principale ───────────────────────��────────────────────────────────
 
 export default function Chat() {
   const { id } = useParams();
@@ -489,7 +555,7 @@ export default function Chat() {
         hour: '2-digit', minute: '2-digit', second: '2-digit',
       });
       window.dispatchEvent(new CustomEvent('sophia:action', {
-        detail: { label: `Modulo "${p.formName}" compilato`, time: tsLabel },
+        detail: { callId: `form-${Date.now()}`, name: 'form_submit', label: `Modulo "${p.formName}" compilato`, time: tsLabel, request: p.values ?? p.data ?? {}, response: { ok: true }, status: 'done' },
       }));
 
       // 3. Se c'è una conversazione aperta e non siamo in streaming,
@@ -613,10 +679,18 @@ export default function Chat() {
       onToken: (delta) => { acc += delta; setStreamText(acc); },
       onTool: (call) => {
         const label = friendlyToolLabel(call.name);
+        const time = new Date().toLocaleString('it-IT', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        // Registra la richiesta (l'esito arriverà con onToolResult e aggiornerà la stessa voce via callId).
         window.dispatchEvent(new CustomEvent('sophia:action', {
-          detail: { label, time: new Date().toLocaleString('it-IT', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }) },
+          detail: { callId: `${call.name}-${Date.now()}-${Math.random().toString(36).slice(2,7)}`, name: call.name, label, time, request: call.args ?? {}, status: 'running' },
         }));
         if (call.name === 'schedule_recurring_action' || call.name === 'cancel_recurring_action') setActivityKey((k) => k + 1);
+      },
+      onToolResult: (res) => {
+        // Aggiorna l'ultima voce in esecuzione per questo tool con la risposta completa.
+        window.dispatchEvent(new CustomEvent('sophia:action-result', {
+          detail: { name: res.name, ok: res.ok, request: res.args ?? {}, response: res.ok ? res.result : { error: res.error } },
+        }));
       },
       onDone: async (payload) => {
         const aiMsg = { id: `a-${Date.now()}`, role: 'assistant', content: acc, toolCalls: payload?.toolCalls || [] };

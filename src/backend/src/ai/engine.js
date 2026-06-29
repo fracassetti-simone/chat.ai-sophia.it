@@ -21,9 +21,10 @@ const MAX_TOOL_ROUNDS = 5;
  * @param {string} [opts.source]   origine del consumo (CHAT, WHATSAPP, WIDGET, ...)
  * @param {string|null} [opts.userRole]  ruolo del richiedente; abilita le capability riservate (es. consultazione costi)
  * @param {(delta:string)=>void} opts.onToken
- * @param {(call:object)=>void}  opts.onToolCall
+ * @param {(call:object)=>void}  opts.onToolCall    invocato quando l'AI richiede una capability (con args)
+ * @param {(result:object)=>void} opts.onToolResult invocato al termine (con args + esito/risposta)
  */
-export async function runChat({ tenantId, conversationId = null, userId = null, isTraining = false, history, allow = null, source = 'CHAT', userRole = null, extraContext = null, agentId = null, agentOverride = null, externalChatId = null, onToken, onToolCall }) {
+export async function runChat({ tenantId, conversationId = null, userId = null, isTraining = false, history, allow = null, source = 'CHAT', userRole = null, extraContext = null, agentId = null, agentOverride = null, externalChatId = null, onToken, onToolCall, onToolResult }) {
   let openai;
   try {
     openai = getOpenAI();
@@ -127,15 +128,20 @@ export async function runChat({ tenantId, conversationId = null, userId = null, 
 
     for (const t of pendingToolCalls.values()) {
       let result;
+      let parsedArgs = {};
       try {
-        const args = t.args ? JSON.parse(t.args) : {};
-        onToolCall?.({ name: t.name, args });
-        result = await registry.invoke(tenantId, t.name, args, { conversationId, userId, userRole, source, userContactId, externalChatId });
-        executedToolCalls.push({ name: t.name, args, ok: true, result });
+        parsedArgs = t.args ? JSON.parse(t.args) : {};
+      } catch { parsedArgs = { _raw: t.args }; }
+      onToolCall?.({ name: t.name, args: parsedArgs });
+      try {
+        result = await registry.invoke(tenantId, t.name, parsedArgs, { conversationId, userId, userRole, source, userContactId, externalChatId });
+        executedToolCalls.push({ name: t.name, args: parsedArgs, ok: true, result });
+        onToolResult?.({ name: t.name, args: parsedArgs, ok: true, result });
       } catch (err) {
         logger.warn({ err, tool: t.name }, 'Capability fallita');
         result = { error: err.message };
-        executedToolCalls.push({ name: t.name, ok: false, error: err.message });
+        executedToolCalls.push({ name: t.name, args: parsedArgs, ok: false, error: err.message });
+        onToolResult?.({ name: t.name, args: parsedArgs, ok: false, error: err.message });
       }
       messages.push({ role: 'tool', tool_call_id: t.id, content: JSON.stringify(result) });
     }
