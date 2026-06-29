@@ -13,7 +13,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   Plus, Trash2, Pencil, Save, X, Search, ChevronLeft,
-  Settings, Database as DbIcon, Eye, Check, Lock, Users, UserCheck,
+  Settings, Database as DbIcon, Eye, EyeOff, Check, Lock, Users, UserCheck, Globe,
   GripVertical, ChevronDown, ArrowLeft,
 } from 'lucide-react';
 import { api } from '../lib/api.js';
@@ -23,11 +23,61 @@ import { useAuth } from '../context/AuthContext.jsx';
 
 // ─── Costanti ─────────────────────────────────────────────────────────────────
 
-const ACCESS_LEVELS = [
-  { value: 'admin',          label: 'Solo admin',                  icon: Lock,      hint: 'Solo admin e super admin' },
-  { value: 'admin_users',    label: 'Admin e tutti gli utenti',    icon: Users,     hint: 'Visibile a tutti gli utenti del tenant' },
-  { value: 'admin_selected', label: 'Admin e utenti selezionati',  icon: UserCheck, hint: 'Scegli manualmente chi può accedere' },
+// Audience selezionabili nel controllo accessi multi-scelta.
+const AUDIENCES = [
+  { value: 'admin',    label: 'Admin',            icon: Lock,      hint: 'Admin e super admin' },
+  { value: 'users',    label: 'Tutti gli utenti', icon: Users,     hint: 'Tutti gli utenti del tenant' },
+  { value: 'selected', label: 'Utenti specifici', icon: UserCheck, hint: 'Scegli manualmente chi può accedere' },
+  { value: 'external', label: 'Utenti esterni',   icon: Globe,     hint: 'Utenti del widget e dei canali esterni' },
 ];
+
+const PERMISSIONS = [
+  { value: 'read',  label: 'Sola lettura' },
+  { value: 'write', label: 'Tutto' },
+];
+
+const AUD_META = Object.fromEntries(AUDIENCES.map(a => [a.value, a]));
+
+// ── Conversione legacy → nuovo modello di accesso ─────────────────────────────
+function legacyToAccess(level) {
+  switch (level) {
+    case 'admin_users':    return [{ audience: 'admin', permission: 'write' }, { audience: 'users', permission: 'read' }];
+    case 'admin_selected': return [{ audience: 'admin', permission: 'write' }, { audience: 'selected', permission: 'read' }];
+    default:               return [{ audience: 'admin', permission: 'write' }];
+  }
+}
+
+function getAccess(obj) {
+  if (Array.isArray(obj?.access) && obj.access.length) {
+    return obj.access.filter(a => a && AUD_META[a.audience]);
+  }
+  return legacyToAccess(obj?.accessLevel);
+}
+
+// Audience dell'utente loggato (admin conta anche come "users").
+function clientAudiences(user) {
+  if (user?.role === 'ADMIN' || user?.role === 'SUPER_ADMIN') return ['admin', 'users'];
+  return ['users'];
+}
+
+// Permesso dell'utente su uno schema/record: 'write' | 'read' | null.
+function clientPermission(user, obj) {
+  if (user?.role === 'SUPER_ADMIN') return 'write';
+  const access = getAccess(obj);
+  const auds = clientAudiences(user);
+  const sel = Array.isArray(obj?.accessUsers) ? obj.accessUsers : [];
+  let best = null;
+  for (const a of access) {
+    let match = false;
+    if (a.audience === 'selected') match = sel.includes(user?.id);
+    else if (a.audience === 'external') match = false;
+    else match = auds.includes(a.audience);
+    if (!match) continue;
+    if (a.permission === 'write') return 'write';
+    best = best || 'read';
+  }
+  return best;
+}
 
 const FIELD_TYPES = [
   { value: 'string',  label: 'Testo breve',      desc: 'Fino a ~255 caratteri, con regex opzionale' },
@@ -70,18 +120,29 @@ function toSlug(str) {
 
 // ─── AccessBadge (solo display) ───────────────────────────────────────────────
 
-function AccessBadge({ value }) {
-  const a = ACCESS_LEVELS.find(x => x.value === value) || ACCESS_LEVELS[0];
-  const Icon = a.icon;
+// Mostra il modello di accesso (array di audience+permesso) come chip compatte.
+function AccessBadge({ value, access }) {
+  const list = Array.isArray(access) && access.length ? access : getAccess({ access, accessLevel: value });
   const colors = {
-    admin:          { bg: 'var(--gray-100,#f3f4f6)', color: 'var(--text-muted,#6b7280)' },
-    admin_users:    { bg: '#eff6ff', color: '#1d4ed8' },
-    admin_selected: { bg: '#faf5ff', color: '#7e22ce' },
+    admin:    { bg: 'var(--gray-100,#f3f4f6)', color: 'var(--text-muted,#6b7280)' },
+    users:    { bg: '#eff6ff', color: '#1d4ed8' },
+    selected: { bg: '#faf5ff', color: '#7e22ce' },
+    external: { bg: '#ecfdf5', color: '#047857' },
   };
-  const c = colors[value] || colors.admin;
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500, background: c.bg, color: c.color }}>
-      <Icon size={10} /> {a.label}
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+      {list.map(a => {
+        const meta = AUD_META[a.audience] || AUD_META.admin;
+        const Icon = meta.icon;
+        const c = colors[a.audience] || colors.admin;
+        return (
+          <span key={a.audience} title={`${meta.label} — ${a.permission === 'write' ? 'tutto' : 'sola lettura'}`}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500, background: c.bg, color: c.color }}>
+            <Icon size={10} /> {meta.label}
+            <span style={{ opacity: .7, fontWeight: 400 }}>· {a.permission === 'write' ? 'tutto' : 'lettura'}</span>
+          </span>
+        );
+      })}
     </span>
   );
 }
@@ -287,42 +348,83 @@ function IconPicker({ value, onChange }) {
   );
 }
 
-// ─── AccessPicker custom (radio group) ───────────────────────────────────────
+// ─── MultiAccessPicker — selezione multipla audience + permesso ───────────────
 
-function AccessPicker({ value, onChange, label = 'Accessibile a', hint }) {
+function MultiAccessPicker({ value, onChange, label = 'Accessibile a', hint }) {
+  const list = Array.isArray(value) ? value : [];
+  const entryFor = aud => list.find(v => v.audience === aud);
+
+  const toggle = aud => {
+    if (entryFor(aud)) onChange(list.filter(v => v.audience !== aud));
+    else onChange([...list, { audience: aud, permission: aud === 'admin' ? 'write' : 'read' }]);
+  };
+  const setPerm = (aud, perm) => onChange(list.map(v => v.audience === aud ? { ...v, permission: perm } : v));
+
   return (
     <div>
       <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>{label}</div>
-      {hint && <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>{hint}</div>}
+      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
+        {hint || 'Seleziona uno o più destinatari e, per ciascuno, il livello di permesso.'}
+      </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        {ACCESS_LEVELS.map(a => {
-          const sel = value === a.value;
+        {AUDIENCES.map(a => {
+          const entry = entryFor(a.value);
+          const sel = !!entry;
           const Icon = a.icon;
           return (
-            <button
+            <div
               key={a.value}
-              type="button"
-              onClick={() => onChange(a.value)}
               style={{
-                display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px',
                 border: `2px solid ${sel ? 'var(--primary)' : 'var(--border)'}`,
                 borderRadius: 10, background: sel ? '#eff6ff' : 'var(--surface)',
-                cursor: 'pointer', textAlign: 'left', transition: 'all .15s',
+                transition: 'all .15s', overflow: 'hidden',
               }}
             >
-              <Icon size={18} style={{ color: sel ? 'var(--primary)' : 'var(--text-muted)', flexShrink: 0 }} />
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 14, fontWeight: 500, color: sel ? 'var(--primary)' : 'var(--text)' }}>{a.label}</div>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{a.hint}</div>
-              </div>
-              <div style={{
-                width: 18, height: 18, borderRadius: 9, border: `2px solid ${sel ? 'var(--primary)' : 'var(--border)'}`,
-                background: sel ? 'var(--primary)' : 'transparent',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-              }}>
-                {sel && <div style={{ width: 6, height: 6, borderRadius: 3, background: '#fff' }} />}
-              </div>
-            </button>
+              <button
+                type="button"
+                onClick={() => toggle(a.value)}
+                style={{
+                  width: '100%', display: 'flex', alignItems: 'center', gap: 12, padding: '11px 14px',
+                  border: 'none', background: 'transparent', cursor: 'pointer', textAlign: 'left',
+                }}
+              >
+                <Icon size={18} style={{ color: sel ? 'var(--primary)' : 'var(--text-muted)', flexShrink: 0 }} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 14, fontWeight: 500, color: sel ? 'var(--primary)' : 'var(--text)' }}>{a.label}</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{a.hint}</div>
+                </div>
+                <div style={{
+                  width: 18, height: 18, borderRadius: 5, flexShrink: 0,
+                  border: `2px solid ${sel ? 'var(--primary)' : 'var(--border)'}`,
+                  background: sel ? 'var(--primary)' : 'transparent',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>
+                  {sel && <Check size={11} style={{ color: '#fff' }} />}
+                </div>
+              </button>
+              {sel && (
+                <div style={{ display: 'flex', gap: 6, padding: '0 14px 12px 44px' }}>
+                  {PERMISSIONS.map(p => {
+                    const on = entry.permission === p.value;
+                    return (
+                      <button
+                        key={p.value}
+                        type="button"
+                        onClick={() => setPerm(a.value, p.value)}
+                        style={{
+                          flex: 1, padding: '7px 10px', borderRadius: 7, fontSize: 12, fontWeight: 600,
+                          border: `1.5px solid ${on ? 'var(--primary)' : 'var(--border)'}`,
+                          background: on ? 'var(--primary)' : 'var(--surface)',
+                          color: on ? '#fff' : 'var(--text)', cursor: 'pointer', transition: 'all .12s',
+                        }}
+                      >
+                        {p.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           );
         })}
       </div>
@@ -546,13 +648,21 @@ function FieldEditor({ field, index, onChange, onRemove }) {
         </div>
       )}
 
-      {/* Obbligatorio */}
-      <Toggle
-        checked={!!field.required}
-        onChange={v => set('required', v)}
-        label="Campo obbligatorio"
-        hint="Il record non può essere salvato senza questo valore"
-      />
+      {/* Obbligatorio + visibilità in tabella */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <Toggle
+          checked={!!field.required}
+          onChange={v => set('required', v)}
+          label="Campo obbligatorio"
+          hint="Il record non può essere salvato senza questo valore"
+        />
+        <Toggle
+          checked={field.inTable !== false}
+          onChange={v => set('inTable', v)}
+          label="Mostra nell'anteprima della tabella"
+          hint="Se disattivato, il campo non appare come colonna nella lista dei record"
+        />
+      </div>
     </div>
   );
 }
@@ -565,16 +675,24 @@ function SchemaEditor({ schema, onBack, onSaved }) {
   const [description, setDescription] = useState(schema?.description || '');
   const [icon, setIcon] = useState(schema?.icon || 'server-outline');
   const [showInSidebar, setShowInSidebar] = useState(schema?.showInSidebar || false);
-  const [accessLevel, setAccessLevel] = useState(schema?.accessLevel || 'admin');
-  const [defaultRecordAccess, setDefaultRecordAccess] = useState(schema?.defaultRecordAccess || 'admin');
+  const [access, setAccess] = useState(getAccess(schema || {}));
+  const [defaultRecordAccess, setDefaultRecordAccess] = useState(
+    (Array.isArray(schema?.defaultRecordAccess) && schema.defaultRecordAccess.length)
+      ? schema.defaultRecordAccess
+      : getAccess({ accessLevel: typeof schema?.defaultRecordAccess === 'string' ? schema.defaultRecordAccess : 'admin' })
+  );
+  const [accessUsers, setAccessUsers] = useState(schema?.accessUsers || []);
   const [fields, setFields] = useState(
     (schema?.fields || []).map(f => ({ ...f, _nameTouched: !!f.name }))
   );
   const [saving, setSaving] = useState(false);
 
+  const accessHasSelected = access.some(a => a.audience === 'selected')
+    || defaultRecordAccess.some(a => a.audience === 'selected');
+
   const addField = () => setFields(f => [
     ...f,
-    { id: `f_${Date.now()}`, name: '', label: '', type: 'string', required: false, _nameTouched: false },
+    { id: `f_${Date.now()}`, name: '', label: '', type: 'string', required: false, inTable: true, _nameTouched: false },
   ]);
   const updateField = (i, u) => setFields(f => f.map((x, j) => j === i ? u : x));
   const removeField = (i) => setFields(f => f.filter((_, j) => j !== i));
@@ -590,7 +708,12 @@ function SchemaEditor({ schema, onBack, onSaved }) {
 
     setSaving(true);
     try {
-      const body = { name, description, icon, showInSidebar, accessLevel, defaultRecordAccess, fields };
+      const body = {
+        name, description, icon, showInSidebar,
+        access, defaultRecordAccess,
+        accessUsers: accessHasSelected ? accessUsers : [],
+        fields,
+      };
       if (schema?.id) {
         await api(`/db/schemas/${schema.id}`, { method: 'PATCH', body });
         toast.info('Database aggiornato');
@@ -682,21 +805,27 @@ function SchemaEditor({ schema, onBack, onSaved }) {
         <div style={{ position: 'sticky', top: 20 }}>
           <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 20, marginBottom: 16 }}>
             <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 16 }}>Accesso al database</div>
-            <AccessPicker
-              value={accessLevel}
-              onChange={setAccessLevel}
-              label="Chi può vedere questo database"
+            <MultiAccessPicker
+              value={access}
+              onChange={setAccess}
+              label="Chi può accedere a questo database"
             />
           </div>
-          <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 20 }}>
+          <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 20, marginBottom: 16 }}>
             <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 16 }}>Accesso predefinito record</div>
-            <AccessPicker
+            <MultiAccessPicker
               value={defaultRecordAccess}
               onChange={setDefaultRecordAccess}
               label="Accessibilità predefinita dei nuovi record"
               hint="Può essere cambiata singolarmente su ogni record"
             />
           </div>
+          {accessHasSelected && (
+            <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 20 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 16 }}>Utenti specifici</div>
+              <UserPicker selected={accessUsers} onChange={setAccessUsers} />
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -716,16 +845,24 @@ function RecordEditor({ record, schema, onBack, onSaved, canWrite }) {
     for (const f of fields) init[f.id || f.name] = record?.data?.[f.id || f.name] ?? '';
     return init;
   });
-  const [accessLevel, setAccessLevel] = useState(record?.accessLevel || schema.defaultRecordAccess || 'admin');
-  const [accessUsers, setAccessUsers] = useState(record?.accessUsers || []);
+  const [access, setAccess] = useState(
+    record?.id
+      ? getAccess(record)
+      : ((Array.isArray(schema.defaultRecordAccess) && schema.defaultRecordAccess.length)
+          ? schema.defaultRecordAccess
+          : getAccess({ accessLevel: typeof schema.defaultRecordAccess === 'string' ? schema.defaultRecordAccess : 'admin' }))
+  );
+  const [accessUsers, setAccessUsers] = useState(record?.accessUsers || schema?.accessUsers || []);
   const [saving, setSaving] = useState(false);
+
+  const accessHasSelected = access.some(a => a.audience === 'selected');
 
   const set = (key, val) => setData(d => ({ ...d, [key]: val }));
 
   const save = async () => {
     setSaving(true);
     try {
-      const body = { data, accessLevel, accessUsers: accessLevel === 'admin_selected' ? accessUsers : [] };
+      const body = { data, access, accessUsers: accessHasSelected ? accessUsers : [] };
       if (record?.id) {
         await api(`/db/schemas/${schema.id}/records/${record.id}`, { method: 'PATCH', body });
         toast.info('Record aggiornato');
@@ -833,10 +970,11 @@ function RecordEditor({ record, schema, onBack, onSaved, canWrite }) {
           <div style={{ position: 'sticky', top: 20 }}>
             <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 20, marginBottom: 16 }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 16 }}>Accessibile a</div>
-              <AccessPicker value={accessLevel} onChange={setAccessLevel} />
+              <MultiAccessPicker value={access} onChange={setAccess} label="Chi può accedere a questo record" />
             </div>
-            {accessLevel === 'admin_selected' && (
+            {accessHasSelected && (
               <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 20 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 16 }}>Utenti specifici</div>
                 <UserPicker selected={accessUsers} onChange={setAccessUsers} />
               </div>
             )}
@@ -844,7 +982,7 @@ function RecordEditor({ record, schema, onBack, onSaved, canWrite }) {
         ) : (
           <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 16 }}>
             <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 8 }}>ACCESSIBILE A</div>
-            <AccessBadge value={accessLevel} />
+            <AccessBadge access={access} />
           </div>
         )}
       </div>
@@ -929,7 +1067,7 @@ function SchemaList({ onSelect, onNew }) {
                   <IonIcon name={s.icon || 'server-outline'} size={18} style={{ color: 'var(--primary)' }} />
                   <span className="flow-name">{s.name}</span>
                   {s.showInSidebar && <span className="badge badge-on" style={{ fontSize: 10 }}>Sidebar</span>}
-                  <AccessBadge value={s.accessLevel} />
+                  <AccessBadge access={getAccess(s)} />
                   {s.description && <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{s.description}</span>}
                 </div>
                 <div className="flow-actions" onClick={e => e.stopPropagation()}>
@@ -1025,7 +1163,8 @@ function RecordView({ initialSchema, onBack, onEditStructure }) {
   }
 
   const fields = schema.fields || [];
-  const tableFields = fields.slice(0, 4);
+  // Solo i campi marcati come visibili nell'anteprima (default: visibili), max 4 colonne.
+  const tableFields = fields.filter(f => f.inTable !== false).slice(0, 4);
 
   return (
     <div>
@@ -1044,7 +1183,7 @@ function RecordView({ initialSchema, onBack, onEditStructure }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <h1 style={{ fontSize: 20, fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
             {schema.name}
-            <AccessBadge value={schema.accessLevel} />
+            <AccessBadge access={getAccess(schema)} />
           </h1>
           <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: 0 }}>{total} record</p>
         </div>
@@ -1095,7 +1234,6 @@ function RecordView({ initialSchema, onBack, onEditStructure }) {
                       {f.label}
                     </th>
                   ))}
-                  <th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: 600, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>Accessibile a</th>
                   <th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: 600, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>Aggiornato</th>
                   <th style={{ width: 110 }} />
                 </tr>
@@ -1112,7 +1250,6 @@ function RecordView({ initialSchema, onBack, onEditStructure }) {
                         </td>
                       );
                     })}
-                    <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}><AccessBadge value={r.accessLevel} /></td>
                     <td style={{ padding: '10px 14px', color: 'var(--text-muted)', whiteSpace: 'nowrap', fontSize: 11 }}>{fmtDate(r.updatedAt)}</td>
                     <td style={{ padding: '6px 10px', whiteSpace: 'nowrap' }}>
                       <div style={{ display: 'flex', gap: 4 }}>
@@ -1145,7 +1282,7 @@ function RecordView({ initialSchema, onBack, onEditStructure }) {
   );
 }
 
-// ─── Entry point ──────────────────────────────────────────────────────────────
+// ─── Entry point ─────────────────��────────────────────────────────────────────
 
 export default function Database() {
   const { schemaId } = useParams();

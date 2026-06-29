@@ -922,9 +922,50 @@
 .logo-upload-area:hover { border-color: var(--primary); background: var(--blue-50); color: var(--primary); }
 .logo-preview-row { display: flex; align-items: center; gap: 12px; }
 .logo-preview-img { height: 44px; width: auto; max-width: 120px; border-radius: 6px; border: 1px solid var(--border); object-fit: contain; padding: 4px; }
+.widget-preview-stage {
+  position: relative; min-height: 380px; padding: 20px;
+  background:
+    radial-gradient(circle at 1px 1px, rgba(0,0,0,.05) 1px, transparent 0) 0 0 / 18px 18px,
+    var(--gray-50);
+  border-radius: 12px; border: 1px solid var(--border); overflow: hidden;
+}
+.widget-preview-panel {
+  position: absolute; right: 20px; bottom: 84px; width: 280px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: 0 12px 32px rgba(0,0,0,.16); overflow: hidden;
+  display: flex; flex-direction: column;
+}
+.widget-preview-header {
+  display: flex; align-items: center; gap: 10px; padding: 12px 14px; color: #fff;
+}
+.widget-preview-avatar {
+  width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
+  background: rgba(255,255,255,.22); display: grid; place-items: center;
+  color: #fff; font-weight: 700; font-size: 15px; overflow: hidden;
+}
+.widget-preview-avatar img { width: 100%; height: 100%; object-fit: contain; }
+.widget-preview-htext { display: flex; flex-direction: column; line-height: 1.2; min-width: 0; }
+.widget-preview-htext strong { font-size: 14px; font-weight: 600; }
+.widget-preview-htext span { font-size: 11px; opacity: .85; }
+.widget-preview-body { padding: 16px 14px; min-height: 120px; background: var(--gray-50); }
+.widget-preview-msg {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px 12px 12px 4px;
+  padding: 9px 12px; font-size: 13px; color: var(--text); max-width: 85%; line-height: 1.4;
+  box-shadow: 0 1px 2px rgba(0,0,0,.04);
+}
+.widget-preview-input {
+  display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+  border-top: 1px solid var(--border); background: var(--surface);
+}
+.widget-preview-input span {
+  flex: 1; font-size: 12px; color: var(--text-muted);
+  background: var(--gray-50); border: 1px solid var(--border);
+  border-radius: 20px; padding: 8px 12px;
+}
+.widget-preview-send { width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0; }
 .widget-preview-bubble {
-  position: absolute; right: 16px; bottom: 16px; width: 48px; height: 48px;
-  border-radius: 50%; display: grid; place-items: center; box-shadow: 0 4px 12px rgba(0,0,0,.18);
+  position: absolute; right: 20px; bottom: 20px; width: 52px; height: 52px;
+  border-radius: 50%; display: grid; place-items: center; box-shadow: 0 6px 16px rgba(0,0,0,.22);
 }
 
 /* ── Cost section EUR fix ────────────────────────────────────────────── */
