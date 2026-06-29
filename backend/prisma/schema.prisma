@@ -1,0 +1,1014 @@
+// Sophia (PH) — Schema dati multi-tenant
+// Provider: PostgreSQL. Le migrazioni vengono applicate automaticamente all'avvio (vedi src/db/bootstrap.js).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Tenancy & identità
+// ─────────────────────────────────────────────────────────────
+
+enum SystemRole {
+  SUPER_ADMIN // opera trasversalmente a tutti i tenant
+  ADMIN // gestisce esclusivamente il proprio tenant
+  MEMBER // utente standard del tenant
+}
+
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users         User[]
+  conversations Conversation[]
+  training      TrainingConfig?
+  moduleInstances ModuleInstance[]
+  apiEndpoints  ApiEndpoint[]
+  apiKeys       ApiKey[]
+  embeds        EmbedWidget[]
+  documents     Document[]
+  auditLogs     AuditLog[]
+  whatsAppSyncedConversations WhatsAppSyncedConversation[]
+  geminiConfig  GeminiConfig?
+  trainingDocuments TrainingDocument[]
+  trainingChatSessions TrainingChatSession[]
+  backgroundTasks BackgroundTask[]
+  flows         Flow[]
+  externalChats ExternalChat[]
+  tokenUsages   TokenUsage[]
+  contacts      Contact[]
+  cloudFolders  CloudFolder[]
+  calendars     Calendar[]
+  emailAccounts EmailAccount[]
+  collectFields CollectField[]
+  trainingVersions TrainingVersion[]
+  compilerForms CompilerForm[]
+  compilerSubmissions CompilerSubmission[]
+  sipClients    SipClient[]
+  agents        Agent[]
+  dbSchemas     DbSchema[]
+}
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  passwordHash String
+  name         String?
+  role         SystemRole @default(MEMBER)
+  isActive     Boolean    @default(true)
+  // Un SUPER_ADMIN può non appartenere ad alcun tenant (tenantId null).
+  tenantId     String?
+  tenant       Tenant?    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  permissions   UserPermission[]
+  refreshTokens RefreshToken[]
+  conversations Conversation[]
+  auditLogs     AuditLog[]
+  phoneLink     UserPhoneLink?
+  profile       UserProfile?
+  whatsAppSyncedConversations WhatsAppSyncedConversation[]
+  tokenUsages   TokenUsage[]
+  ownedCalendars Calendar[]      @relation("CalendarOwner")
+  calendarShares CalendarShare[]
+
+  @@index([tenantId])
+}
+
+// RBAC granulare: ogni permesso è una stringa "risorsa:azione" (es. "users:create").
+model UserPermission {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  key    String
+
+  @@unique([userId, key])
+  @@index([userId])
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Chat AI
+// ─────────────────────────────────────────────────────────────
+
+enum MessageRole {
+  user
+  assistant
+  system
+  tool
+}
+
+model Conversation {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String   @default("Nuova conversazione")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages Message[]
+  backgroundTasks BackgroundTask[]
+  whatsAppSync  WhatsAppSyncedConversation?
+  trainingSession TrainingChatSession?
+  activeAgent   ConversationAgent?
+
+  @@index([tenantId, userId])
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           MessageRole
+  content        String
+  // Eventuali chiamate a capability dei moduli effettuate dall'AI per questo messaggio.
+  toolCalls      Json?
+  attachments    Json?
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Addestramento (system prompt persistente per tenant)
+// ─────────────────────────────────────────────────────────────
+
+model TrainingConfig {
+  id           String  @id @default(cuid())
+  tenantId     String  @unique
+  tenant       Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  mainPrompt   String  @default("")
+  personality  String  @default("")
+  rules        String  @default("")
+  context      String  @default("")
+  instructions String  @default("")
+  updatedAt    DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────
+// Sistema moduli (plugin)
+// ─────────────────────────────────────────────────────────────
+
+// Stato per-tenant di un modulo. La definizione del modulo vive nel codice
+// (cartella src/modules/*); qui memorizziamo installazione e configurazione.
+model ModuleInstance {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  moduleKey   String // es. "email", "whatsapp", "connect-api"
+  installed   Boolean  @default(true)
+  enabled     Boolean  @default(true)
+  config      Json     @default("{}")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([tenantId, moduleKey])
+  @@index([tenantId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Modulo "Connetti API": registro endpoint utilizzabili dall'AI
+// ─────────────────────────────────────────────────────────────
+
+enum HttpMethod {
+  GET
+  POST
+  PUT
+  PATCH
+  DELETE
+}
+
+model ApiEndpoint {
+  id          String     @id @default(cuid())
+  tenantId    String
+  tenant      Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name        String
+  description String     @default("")
+  url         String
+  method      HttpMethod @default(GET)
+  category    String     @default("Generale")
+  // Strutture flessibili: { "Authorization": "Bearer {{token}}" }, ecc.
+  headers     Json       @default("{}")
+  query       Json       @default("{}")
+  params      Json       @default("{}")
+  body        Json       @default("{}")
+  variables   Json       @default("{}")
+  bearerToken String?
+  enabled     Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@index([tenantId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Task in background: retry intelligenti su chiamate API fallite
+// (es. 429 / "riprova più tardi") e azioni ricorrenti per chat
+// (es. "ogni ora invia questo messaggio su WhatsApp").
+// Eseguiti lato server da un piccolo scheduler in-process, quindi
+// continuano a girare anche se l'utente chiude il browser.
+// ─────────────────────────────────────────────────────────────
+
+enum BackgroundTaskKind {
+  RETRY // one-shot: riprova una chiamata endpoint dopo un certo ritardo
+  RECURRING // si ripete ogni intervalSeconds, riesegue "instruction" in chat
+  ONCE // esegue "instruction" una sola volta alla data runAt
+}
+
+enum BackgroundTaskStatus {
+  ACTIVE
+  PAUSED
+  DONE
+  FAILED
+}
+
+model BackgroundTask {
+  id              String              @id @default(cuid())
+  tenantId        String
+  tenant          Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversationId  String?
+  conversation    Conversation?       @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  kind            BackgroundTaskKind
+  // Per RECURRING: istruzione in linguaggio naturale da rieseguire come messaggio utente.
+  // Per RETRY: descrizione leggibile (es. "Riprova chiamata a 'Verifica template'").
+  instruction     String              @default("")
+  // Dati aggiuntivi: per RETRY { endpointId, variables }; per RECURRING eventuale contesto extra.
+  payload         Json                @default("{}")
+  // null per RETRY (one-shot); valore in secondi per RECURRING.
+  intervalSeconds Int?
+  runAt           DateTime
+  attempts        Int                 @default(0)
+  maxAttempts     Int?
+  status          BackgroundTaskStatus @default(ACTIVE)
+  lastResult      Json?
+  lastRunAt       DateTime?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  @@index([tenantId, status, runAt])
+  @@index([conversationId])
+}
+
+
+
+model ApiKey {
+  id          String    @id @default(cuid())
+  tenantId    String
+  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name        String
+  description String    @default("")
+  // Mostrato una sola volta in chiaro alla creazione; in DB solo l'hash.
+  keyHash     String    @unique
+  prefix      String // primi caratteri, per riconoscimento in lista
+  permissions Json      @default("[]")
+  enabled     Boolean   @default(true)
+  lastUsedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([tenantId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Embed (widget chat per siti esterni)
+// ─────────────────────────────────────────────────────────────
+
+model EmbedWidget {
+  id              String   @id @default(cuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  publicId        String   @unique @default(cuid())
+  title           String   @default("Assistente")
+  primaryColor    String   @default("#2563eb")
+  logoUrl         String?
+  iconUrl         String?
+  welcomeMessage  String   @default("Ciao! Come posso aiutarti?")
+  width           Int      @default(380)
+  height          Int      @default(600)
+  // Toggle delle capability esposte al widget pubblico.
+  enabledFeatures Json     @default("{}")
+  enabled         Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([tenantId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Documenti caricati (sorgente per RAG / documentazione API)
+// ─────────────────────────────────────────────────────────────
+
+model Document {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  filename    String
+  mimeType    String
+  sizeBytes   Int
+  // Testo estratto (pdf/docx/txt/md) per uso da parte dell'AI.
+  extracted   String   @default("")
+  // Binario del file (per poterlo servire con URL pubblico)
+  data        Bytes?
+  // Cloud documentale: cartella di appartenenza, contatto collegato, etichette.
+  folderId    String?
+  folder      CloudFolder? @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  contactId   String?
+  tags        String[] @default([])
+  createdAt   DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([tenantId, folderId])
+  @@index([tenantId, contactId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Audit log
+// ─────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  tenantId  String?
+  tenant    Tenant?  @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    String
+  target    String?
+  metadata  Json?
+  ip        String?
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// WhatsApp: messaggi in coda e sessioni contatti
+// ─────────────────────────────────────────────────────────────
+
+model WhatsAppPendingMessage {
+  id              String    @id @default(cuid())
+  tenantId        String
+  to              String    // numero E.164 / wa_id
+  type            String    @default("text") // text | image | document
+  content         Json      // { text } | { url, caption } | { url, filename, caption }
+  deliveredAt     DateTime?
+  createdAt       DateTime  @default(now())
+
+  @@index([tenantId, to, deliveredAt])
+}
+
+model WhatsAppContact {
+  id               String    @id @default(cuid())
+  tenantId         String
+  phone            String    // wa_id del contatto
+  sessionExpiresAt DateTime? // sessione 24h aperta dopo l'ultima risposta
+  templateSentAt   DateTime? // ultima volta che abbiamo inviato il template
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@unique([tenantId, phone])
+  @@index([tenantId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Collegamento numero di telefono utente (OTP via ai-sophia)
+// ─────────────────────────────────────────────────────────────
+
+model UserPhoneLink {
+  id          String   @id @default(cuid())
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  phone       String   // E.164, es. +393331234567
+  verified    Boolean  @default(false)
+  pendingOtpId String?  // otp_... restituito da ai-sophia
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Chat sincronizzata WhatsApp per tenant
+// ─────────────────────────────────────────────────────────────
+
+model WhatsAppSyncedConversation {
+  id             String       @id @default(cuid())
+  tenantId       String
+  tenant         Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  phone          String       // numero WA certificato
+  conversationId String       @unique
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(now())
+
+  @@index([tenantId, phone])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Modulo Gemini: API key per tenant (gestita nel DB, non nel .env)
+// ─────────────────────────────────────────────────────────────
+
+model GeminiConfig {
+  id         String   @id @default(cuid())
+  tenantId   String   @unique
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  apiKey     String   // chiave Google Gemini per questo tenant
+  model      String   @default("gemini-2.5-flash")
+  updatedAt  DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────
+// Documenti training (manuali interrogabili da Gemini)
+// ─────────────────────────────────────────────────────────────
+
+model TrainingDocument {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  filename  String
+  mimeType  String
+  sizeBytes Int
+  data      Bytes    // file binario memorizzato (max ~5 MB consigliato)
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Chat di addestramento (flag + snapshot prompt)
+// ─────────────────────────────────────────────────────────────
+
+model TrainingChatSession {
+  id             String       @id @default(cuid())
+  conversationId String       @unique
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  tenantId       String
+  tenant         Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  isActive       Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+
+  @@index([tenantId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Flussi globali (trigger su eventi WA/widget)
+// ─────────────────────────────────────────────────────────────
+
+enum FlowTrigger {
+  WA_MESSAGE_RECEIVED      // qualsiasi messaggio WA in arrivo
+  WA_FILE_RECEIVED         // file / immagine ricevuta su WA
+  WA_AUDIO_RECEIVED        // audio ricevuto su WA
+  WIDGET_MESSAGE_RECEIVED  // messaggio dal widget embed
+}
+
+enum FlowStatus {
+  ACTIVE
+  PAUSED
+}
+
+model Flow {
+  id          String      @id @default(cuid())
+  tenantId    String
+  tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name        String
+  description String      @default("")
+  trigger     FlowTrigger
+  instruction String      // istruzione AI da eseguire quando il trigger scatta
+  status      FlowStatus  @default(ACTIVE)
+  lastRunAt   DateTime?
+  runCount    Int         @default(0)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  @@index([tenantId, status])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Chat esterne (conversazioni con clienti via WA o widget)
+// ─────────────────────────────────────────────────────────────
+
+enum ExternalChatSource {
+  WHATSAPP
+  WIDGET
+}
+
+model ExternalChat {
+  id          String             @id @default(cuid())
+  tenantId    String
+  tenant      Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  source      ExternalChatSource
+  externalId  String             // phone (WA) o sessionId (widget)
+  displayName String?            // nome contatto se noto
+  lastMessageAt DateTime?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  messages    ExternalMessage[]
+  activeAgent ExternalChatAgent?
+
+  @@unique([tenantId, source, externalId])
+  @@index([tenantId, source])
+}
+
+enum ExternalMessageRole {
+  customer   // messaggio del cliente
+  ai         // risposta AI
+  operator   // intervento manuale dell'operatore
+}
+
+model ExternalMessage {
+  id             String              @id @default(cuid())
+  chatId         String
+  chat           ExternalChat        @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  role           ExternalMessageRole
+  content        String
+  // Allegati: array JSON di { type, url, filename, mimeType }
+  attachments    Json?
+  waMessageId    String?             // id del messaggio Meta (per dedup)
+  createdAt      DateTime            @default(now())
+
+  @@index([chatId, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Profilo utente (preferenze, numero WA, memo AI)
+// ─────────────────────────────────────────────────────────────
+
+model UserProfile {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  whatsappNumber String?
+  contactId     String?  // ID del contatto in rubrica collegato a questo utente
+  memory        Json     @default("{}")
+  updatedAt     DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────
+// Cache media WhatsApp (immagini, audio, documenti)
+// I binari vengono scaricati e conservati per servire URL stabili
+// ─────────────────────────────────────────────────────────────
+
+model WaMediaCache {
+  id         String   @id @default(cuid())
+  waMediaId  String   @unique   // id del media su Meta
+  data       Bytes               // binario scaricato
+  mimeType   String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([waMediaId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Consumo token AI (per dashboard costi)
+// Registriamo i token effettivi restituiti dal modello e il costo
+// calcolato sui prezzi correnti (GPT-5.5). I prezzi sono congelati al
+// momento della registrazione, così lo storico resta accurato anche se
+// i listini cambiano in futuro.
+// ─────────────────────────────────────────────────────────────
+
+enum TokenUsageSource {
+  CHAT      // chat interna della dashboard
+  WHATSAPP  // risposta AI su WhatsApp
+  WIDGET    // widget integrato su siti esterni
+  EMAIL     // risposta AI via email
+  FLOW      // automazione su evento
+  SCHEDULED // azione ricorrente/programmata
+  TRAINING  // chat di addestramento
+}
+
+model TokenUsage {
+  id               String           @id @default(cuid())
+  tenantId         String
+  tenant           Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId           String?
+  user             User?            @relation(fields: [userId], references: [id], onDelete: SetNull)
+  conversationId   String?
+  source           TokenUsageSource @default(CHAT)
+  model            String
+  // Token di input non in cache (tariffa piena)
+  inputTokens      Int              @default(0)
+  // Token di input serviti dalla cache (tariffa ridotta)
+  cachedInputTokens Int             @default(0)
+  // Token di output generati
+  outputTokens     Int              @default(0)
+  // Costo in USD calcolato sui prezzi al momento della registrazione
+  costUsd          Float            @default(0)
+  createdAt        DateTime         @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, source, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Rubrica (CRM contatti per tenant)
+// I contatti WhatsApp si popolano automaticamente dalle conversazioni;
+// l'AI può aggiornarli quando il cliente condivide i propri dati.
+// ─────────────────────────────────────────────────────────────
+
+model Contact {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  firstName    String?
+  lastName     String?
+  phone        String?  // E.164 senza "+", normalizzato (es. 393331234567)
+  email        String?
+  company      String?
+  jobRole      String?  // ruolo del contatto in azienda
+  city         String?
+  address      String?
+  preferences  String?
+  category     String?  // gruppo/segmento, es. "Clienti", "Fornitori"
+  tags         String[] @default([])
+  notes        String?
+  // Campi personalizzati liberi: { "Codice cliente": "C-102", ... }
+  customFields Json     @default("{}")
+  // Da dove arriva il contatto: manual | whatsapp | widget | ai
+  source       String   @default("manual")
+  folder       CloudFolder?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([tenantId, phone])
+  @@index([tenantId, category])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Cloud documentale: albero di cartelle per tenant.
+// Ogni contatto può avere una propria cartella (relazione 1:1).
+// I file vivono nel modello Document (con folderId/contactId/tags).
+// ─────────────────────────────────────────────────────────────
+
+model CloudFolder {
+  id        String        @id @default(cuid())
+  tenantId  String
+  tenant    Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name      String
+  parentId  String?
+  parent    CloudFolder?  @relation("FolderTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children  CloudFolder[] @relation("FolderTree")
+  // Cartella dedicata a un contatto (creata su richiesta). 1:1 col contatto.
+  contactId String?       @unique
+  contact   Contact?      @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  documents Document[]
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@index([tenantId, parentId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Calendario
+// ─────────────────────────────────────────────────────────────
+
+model Calendar {
+  id          String          @id @default(cuid())
+  tenantId    String
+  tenant      Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  ownerId     String
+  owner       User            @relation("CalendarOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  name        String
+  color       String          @default("#2563eb")
+  isDefault   Boolean         @default(false)
+  // Utenti con accesso in lettura (oltre al proprietario)
+  sharedWith  CalendarShare[]
+  events      CalendarEvent[]
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@index([tenantId, ownerId])
+}
+
+model CalendarShare {
+  id         String   @id @default(cuid())
+  calendarId String
+  calendar   Calendar @relation(fields: [calendarId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  canEdit    Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@unique([calendarId, userId])
+}
+
+model CalendarEvent {
+  id           String    @id @default(cuid())
+  calendarId   String
+  calendar     Calendar  @relation(fields: [calendarId], references: [id], onDelete: Cascade)
+  title        String
+  description  String?
+  location     String?
+  startAt      DateTime
+  endAt        DateTime
+  allDay       Boolean   @default(false)
+  // Reminder: minuti prima, canale (whatsapp | email | dashboard)
+  reminderMin  Int?
+  reminderCh   String?   @default("dashboard")
+  // Riferimento a un contatto (opzionale)
+  contactId    String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([calendarId, startAt])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Modulo Email — account IMAP/SMTP, conversazioni, messaggi
+// ─────────────────────────────────────────────────────────────
+
+model EmailAccount {
+  id           String         @id @default(cuid())
+  tenantId     String
+  tenant       Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name         String
+  email        String
+  smtpHost     String
+  smtpPort     Int            @default(587)
+  smtpSecure   Boolean        @default(false)
+  smtpUser     String
+  smtpPass     String
+  imapHost     String?
+  imapPort     Int?           @default(993)
+  imapSecure   Boolean        @default(true)
+  imapUser     String?
+  imapPass     String?
+  signature    String?
+  lastSyncAt   DateTime?
+  enabled      Boolean        @default(true)
+  // Risposta automatica AI
+  aiAutoReply  Boolean        @default(true)
+  // Filtro: JSON array di indirizzi a cui NON rispondere automaticamente
+  aiReplyFilter Json          @default("[]")
+  threads      EmailThread[]
+  createdAt    DateTime       @default(now())
+
+  @@index([tenantId])
+}
+
+model EmailThread {
+  id            String         @id @default(cuid())
+  accountId     String
+  account       EmailAccount   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  subject       String
+  fromEmail     String
+  fromName      String?
+  lastMessageAt DateTime       @default(now())
+  isRead        Boolean        @default(false)
+  // Contatto in rubrica collegato automaticamente
+  contactId     String?
+  messages      EmailMessage[]
+  createdAt     DateTime       @default(now())
+
+  @@index([accountId, lastMessageAt])
+}
+
+model EmailMessage {
+  id          String      @id @default(cuid())
+  threadId    String
+  thread      EmailThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  role        String      // "inbound" | "outbound" | "ai"
+  fromEmail   String
+  fromName    String?
+  toEmail     String
+  subject     String
+  // Testo pulito (solo il nuovo testo, senza quoted reply)
+  bodyText    String
+  bodyHtml    String?
+  // Allegati: [{filename, mimeType, size, docId?}]
+  attachments Json        @default("[]")
+  messageId   String?     // Message-ID IMAP per dedup
+  createdAt   DateTime    @default(now())
+
+  @@index([threadId, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Dati da collezionare — campi che l'AI deve raccogliere nelle conv.
+// ─────────────────────────────────────────────────────────────
+
+model CollectField {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  label       String   // nome campo, es. "Email"
+  key         String   // chiave interna, es. "email"
+  description String?  // istruzione per l'AI
+  fieldType   String   @default("text") // text | email | phone | number | date | boolean
+  required    Boolean  @default(false)
+  order       Int      @default(0)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  @@index([tenantId, order])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Versioni di addestramento (backup storico)
+// ─────────────────────────────────────────────────────────────
+
+model TrainingVersion {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  mainPrompt   String   @default("")
+  personality  String   @default("")
+  rules        String   @default("")
+  context      String   @default("")
+  instructions String   @default("")
+  savedBy      String?  // userId di chi ha salvato
+  note         String?  // etichetta opzionale
+  createdAt    DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+}
+
+model CompilerForm {
+  id          String               @id @default(cuid())
+  tenantId    String
+  tenant      Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  templateId  String               // ID su compiler.ai-sophia.it
+  name        String
+  formUrl     String?
+  editUrl     String?
+  fields      Json                 @default("[]")
+  attachments Json                 @default("[]")
+  status      String               @default("processing")
+  createdAt   DateTime             @default(now())
+  submissions CompilerSubmission[]
+
+  @@index([tenantId])
+}
+
+model CompilerSubmission {
+  id           String       @id @default(cuid())
+  tenantId     String
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  formId       String
+  form         CompilerForm @relation(fields: [formId], references: [id], onDelete: Cascade)
+  submissionId String
+  contactId    String?
+  email        String?
+  fields       Json         @default("[]")
+  attachments  Json         @default("[]")
+  pdfUrl       String?
+  createdAt    DateTime     @default(now())
+
+  @@index([tenantId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Credenziali SIP — per ogni tenant, lista di account SIP
+// ─────────────────────────────────────────────────────────────
+
+model SipClient {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  did         String   // Numero DID (Direct Inward Dialing)
+  internal    String   @default("") // Interno/estensione
+  username    String
+  password    String
+  host        String
+  port        Int      @default(5060)
+  protocol    String   @default("UDP") // UDP | TCP | TLS
+  useLocalIp  Boolean  @default(false)
+  label       String?  // etichetta opzionale per riconoscere l'account
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([tenantId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Multi-agente: ogni tenant può avere più agenti ognuno con
+// il proprio addestramento e versioning indipendente.
+// ─────────────────────────────────────────────────────────────
+
+model Agent {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name         String                          // es. "Sophia", "Assistente Vendite"
+  description  String   @default("")           // nota interna
+  avatar       String?                         // emoji o URL icona
+  isDefault    Boolean  @default(false)        // agente predefinito del tenant
+  mainPrompt   String   @default("")
+  personality  String   @default("")
+  rules        String   @default("")
+  context      String   @default("")
+  instructions String   @default("")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  versions     AgentVersion[]
+  conversations ConversationAgent[]
+  externalChats ExternalChatAgent[]
+
+  @@index([tenantId])
+}
+
+model AgentVersion {
+  id           String   @id @default(cuid())
+  agentId      String
+  agent        Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  tenantId     String
+  mainPrompt   String   @default("")
+  personality  String   @default("")
+  rules        String   @default("")
+  context      String   @default("")
+  instructions String   @default("")
+  savedBy      String?
+  note         String?
+  createdAt    DateTime @default(now())
+
+  @@index([agentId, createdAt])
+  @@index([tenantId])
+}
+
+// Agente attivo per conversazione interna (dashboard chat)
+model ConversationAgent {
+  conversationId String       @id
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  agentId        String
+  agent          Agent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  assignedAt     DateTime     @default(now())
+}
+
+// Agente attivo per chat esterna (WA / widget)
+model ExternalChatAgent {
+  chatId     String       @id
+  chat       ExternalChat @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  agentId    String
+  agent      Agent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  assignedAt DateTime     @default(now())
+}
+
+// ─────────────────────────────────────────────────────────────
+// Modulo Database — schemi e record personalizzati per tenant
+// ─────────────────────────────────────────────────────────────
+
+model DbSchema {
+  id                 String   @id @default(cuid())
+  tenantId           String
+  tenant             Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name               String                      // es. "Clienti", "Fornitori"
+  icon               String   @default("server-outline") // nome icona Ionicons
+  showInSidebar      Boolean  @default(false)   // se true → appare in sidebar come voce "Dati"
+  description        String   @default("")
+  // Accesso al database intero: admin | admin_users | admin_selected
+  accessLevel        String   @default("admin")
+  // Valore predefinito dell'accessibilità per i nuovi record di questo database
+  defaultRecordAccess String  @default("admin")
+  // fields: array JSON di { id, name, label, type, required, regex?, min?, max?, options? }
+  fields             Json     @default("[]")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  records DbRecord[]
+
+  @@index([tenantId])
+}
+
+model DbRecord {
+  id          String   @id @default(cuid())
+  schemaId    String
+  schema      DbSchema @relation(fields: [schemaId], references: [id], onDelete: Cascade)
+  tenantId    String
+  // data: oggetto JSON con i valori dei campi { fieldId: value }
+  data        Json     @default("{}")
+  // Accessibilità del singolo record: admin | admin_users | admin_selected
+  accessLevel String   @default("admin")
+  // Lista di userId selezionati (solo se accessLevel = admin_selected)
+  accessUsers Json     @default("[]")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([schemaId])
+  @@index([tenantId])
+}
