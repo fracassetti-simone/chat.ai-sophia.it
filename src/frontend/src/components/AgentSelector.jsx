@@ -16,8 +16,21 @@ export default function AgentSelector({ conversationId, externalChatId, compact 
   const [agents, setAgents]       = useState([]);
   const [activeId, setActiveId]   = useState(null);  // agentId attivo per questo contesto
   const [open, setOpen]           = useState(false);
+  const [dropUp, setDropUp]       = useState(false);   // apre il menu verso l'alto se manca spazio sotto
   const [switching, setSwitching] = useState(false);
   const ref = useRef(null);
+  const btnRef = useRef(null);
+
+  // Decide la direzione di apertura in base allo spazio disponibile sotto al pulsante.
+  const toggleOpen = () => {
+    if (!open && btnRef.current) {
+      const rect = btnRef.current.getBoundingClientRect();
+      const spaceBelow = window.innerHeight - rect.bottom;
+      // Se sotto c'è meno spazio dell'altezza stimata del menu, apri verso l'alto.
+      setDropUp(spaceBelow < 280 && rect.top > spaceBelow);
+    }
+    setOpen(o => !o);
+  };
 
   const loadAgents = useCallback(async () => {
     try { const { agents: list } = await api('/agents'); setAgents(list || []); } catch {}
@@ -75,8 +88,9 @@ export default function AgentSelector({ conversationId, externalChatId, compact 
   return (
     <div className="agent-selector" ref={ref} style={{ position: 'relative', display: 'inline-flex' }}>
       <button
+        ref={btnRef}
         className="agent-selector-btn"
-        onClick={() => setOpen(o => !o)}
+        onClick={toggleOpen}
         disabled={switching}
         title="Cambia agente"
         style={{
@@ -93,9 +107,11 @@ export default function AgentSelector({ conversationId, externalChatId, compact 
 
       {open && (
         <div style={{
-          position: 'absolute', top: 'calc(100% + 6px)', left: 0, zIndex: 200,
+          position: 'absolute', left: 0, zIndex: 200,
+          ...(dropUp ? { bottom: 'calc(100% + 6px)' } : { top: 'calc(100% + 6px)' }),
           background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 10,
           boxShadow: '0 4px 20px rgba(0,0,0,.12)', minWidth: 200, overflow: 'hidden',
+          maxHeight: 280, overflowY: 'auto',
         }}>
           <div style={{ padding: '6px 10px 4px', fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: .5 }}>
             Seleziona agente
