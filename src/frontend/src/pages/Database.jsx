@@ -350,9 +350,10 @@ function IconPicker({ value, onChange }) {
 
 // ─── MultiAccessPicker — selezione multipla audience + permesso ───────────────
 
-function MultiAccessPicker({ value, onChange, label = 'Accessibile a', hint }) {
+function MultiAccessPicker({ value, onChange, label = 'Accessibile a', hint, accessUsers = [], onAccessUsersChange }) {
   const list = Array.isArray(value) ? value : [];
   const entryFor = aud => list.find(v => v.audience === aud);
+  const [usersModalOpen, setUsersModalOpen] = useState(false);
 
   const toggle = aud => {
     if (entryFor(aud)) onChange(list.filter(v => v.audience !== aud));
@@ -424,9 +425,56 @@ function MultiAccessPicker({ value, onChange, label = 'Accessibile a', hint }) {
                   })}
                 </div>
               )}
+              {sel && a.value === 'selected' && onAccessUsersChange && (
+                <div style={{ padding: '0 14px 12px 44px' }}>
+                  <button
+                    type="button"
+                    onClick={() => setUsersModalOpen(true)}
+                    style={{
+                      width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                      padding: '9px 12px', borderRadius: 8, fontSize: 13, fontWeight: 600,
+                      border: '1.5px dashed var(--primary)', background: 'var(--surface)',
+                      color: 'var(--primary)', cursor: 'pointer',
+                    }}
+                  >
+                    <Search size={14} />
+                    {accessUsers.length ? `${accessUsers.length} utenti selezionati — modifica` : 'Seleziona utenti…'}
+                  </button>
+                </div>
+              )}
             </div>
           );
         })}
+      </div>
+      {usersModalOpen && (
+        <UserPickerModal
+          selected={accessUsers}
+          onChange={onAccessUsersChange}
+          onClose={() => setUsersModalOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── UserPickerModal — selezione utenti con ricerca in un modal ───────────────
+
+function UserPickerModal({ selected, onChange, onClose }) {
+  const [local, setLocal] = useState(Array.isArray(selected) ? selected : []);
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal card" style={{ maxWidth: 480, width: '100%' }} onClick={e => e.stopPropagation()}>
+        <div className="modal-head-row">
+          <h3 className="modal-title" style={{ margin: 0 }}>Seleziona utenti</h3>
+          <button className="btn btn-ghost icon-btn" onClick={onClose}><X size={16} /></button>
+        </div>
+        <div style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+          <UserPicker selected={local} onChange={setLocal} />
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 18 }}>
+          <button className="btn btn-outline" onClick={onClose}>Annulla</button>
+          <button className="btn btn-primary" onClick={() => { onChange(local); onClose(); }}>Conferma ({local.length})</button>
+        </div>
       </div>
     </div>
   );
@@ -809,6 +857,8 @@ function SchemaEditor({ schema, onBack, onSaved }) {
               value={access}
               onChange={setAccess}
               label="Chi può accedere a questo database"
+              accessUsers={accessUsers}
+              onAccessUsersChange={setAccessUsers}
             />
           </div>
           <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 20, marginBottom: 16 }}>
@@ -818,14 +868,10 @@ function SchemaEditor({ schema, onBack, onSaved }) {
               onChange={setDefaultRecordAccess}
               label="Accessibilità predefinita dei nuovi record"
               hint="Può essere cambiata singolarmente su ogni record"
+              accessUsers={accessUsers}
+              onAccessUsersChange={setAccessUsers}
             />
           </div>
-          {accessHasSelected && (
-            <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 20 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 16 }}>Utenti specifici</div>
-              <UserPicker selected={accessUsers} onChange={setAccessUsers} />
-            </div>
-          )}
         </div>
       </div>
     </div>
@@ -970,14 +1016,9 @@ function RecordEditor({ record, schema, onBack, onSaved, canWrite }) {
           <div style={{ position: 'sticky', top: 20 }}>
             <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 20, marginBottom: 16 }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 16 }}>Accessibile a</div>
-              <MultiAccessPicker value={access} onChange={setAccess} label="Chi può accedere a questo record" />
+              <MultiAccessPicker value={access} onChange={setAccess} label="Chi può accedere a questo record"
+                accessUsers={accessUsers} onAccessUsersChange={setAccessUsers} />
             </div>
-            {accessHasSelected && (
-              <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 20 }}>
-                <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 16 }}>Utenti specifici</div>
-                <UserPicker selected={accessUsers} onChange={setAccessUsers} />
-              </div>
-            )}
           </div>
         ) : (
           <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 16 }}>
@@ -990,7 +1031,7 @@ function RecordEditor({ record, schema, onBack, onSaved, canWrite }) {
   );
 }
 
-// ─── SchemaList ───────────────────────────────────────────────────────────────
+// ─── SchemaList ─────────────────────��─────────────────────────────────────────
 
 function SchemaList({ onSelect, onNew }) {
   const modal = useModal();

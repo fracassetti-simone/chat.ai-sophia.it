@@ -227,5 +227,91 @@ export default defineModule({
         };
       },
     },
+    {
+      name: 'grant_folder_access',
+      description:
+        'Concede o revoca a un utente l\'accesso alla cartella documentale di un contatto. ' +
+        'Usalo quando un admin dice "garantisci/dai accesso ai file/documenti di [contatto] all\'utente [nome]", ' +
+        '"fai vedere i documenti di X a Y", "rimuovi/togli l\'accesso ai documenti di X a Y". ' +
+        'Riservato agli amministratori nella dashboard (non disponibile sui canali esterni).',
+      parameters: {
+        type: 'object',
+        properties: {
+          contactName: { type: 'string', description: 'Nome del contatto proprietario della cartella documentale (es. "Mario Rossi").' },
+          userName:    { type: 'string', description: 'Nome o email dell\'utente a cui concedere/revocare l\'accesso.' },
+          permission:  { type: 'string', enum: ['read', 'write'], description: '"read" = sola lettura (default), "write" = accesso completo.' },
+          revoke:      { type: 'boolean', description: 'true per REVOCARE l\'accesso invece di concederlo.' },
+        },
+        required: ['contactName', 'userName'],
+      },
+      async handler(ctx, args) {
+        // Sicurezza: solo admin interni, mai dai canali esterni.
+        if (isExternalCtx(ctx)) return { ok: false, message: 'Operazione non consentita da questo canale.' };
+        if (ctx.userRole !== 'ADMIN' && ctx.userRole !== 'SUPER_ADMIN') {
+          return { ok: false, message: 'Solo un amministratore può modificare i permessi delle cartelle.' };
+        }
+
+        const { prisma, tenantId } = ctx;
+
+        // 1) Trova il contatto.
+        const cname = `%${String(args.contactName || '').trim()}%`;
+        const contacts = await prisma.$queryRawUnsafe(
+          `SELECT id, "firstName", "lastName", company FROM "Contact"
+           WHERE "tenantId" = $1 AND ("firstName" ILIKE $2 OR "lastName" ILIKE $2 OR company ILIKE $2)
+           LIMIT 5`,
+          tenantId, cname
+        );
+        if (!contacts.length) return { ok: false, message: `Nessun contatto trovato con nome "${args.contactName}".` };
+        const contact = contacts[0];
+        const contactLabel = [contact.firstName, contact.lastName].filter(Boolean).join(' ').trim() || contact.company || args.contactName;
+
+        // 2) Trova la cartella documentale del contatto.
+        const folder = await prisma.cloudFolder.findFirst({ where: { tenantId, contactId: contact.id } });
+        if (!folder) return { ok: false, message: `Non esiste ancora una cartella documentale per ${contactLabel}.` };
+
+        // 3) Trova l'utente destinatario.
+        const term = String(args.userName || '').trim();
+        const users = await prisma.user.findMany({
+          where: { tenantId, OR: [
+            { name:  { contains: term, mode: 'insensitive' } },
+            { email: { contains: term, mode: 'insensitive' } },
+          ] },
+          select: { id: true, name: true, email: true },
+          take: 5,
+        });
+        if (!users.length) return { ok: false, message: `Nessun utente trovato con nome "${args.userName}".` };
+        const user = users[0];
+        const userLabel = user.name || user.email;
+
+        // 4) Aggiorna il modello di accesso (additivo, gli admin restano sempre inclusi).
+        let access = Array.isArray(folder.access) && folder.access.length
+          ? folder.access.map(a => ({ ...a }))
+          : [{ audience: 'admin', permission: 'write' }, { audience: 'users', permission: 'write' }];
+        let accessUsers = Array.isArray(folder.accessUsers) ? folder.accessUsers.slice() : [];
+
+        if (args.revoke) {
+          accessUsers = accessUsers.filter(id => id !== user.id);
+          if (!accessUsers.length) access = access.filter(a => a.audience !== 'selected');
+        } else {
+          const perm = args.permission === 'write' ? 'write' : 'read';
+          const sel = access.find(a => a.audience === 'selected');
+          if (sel) sel.permission = perm;
+          else access.push({ audience: 'selected', permission: perm });
+          if (!accessUsers.includes(user.id)) accessUsers.push(user.id);
+        }
+        if (!access.some(a => a.audience === 'admin')) access.unshift({ audience: 'admin', permission: 'write' });
+
+        await prisma.cloudFolder.update({ where: { id: folder.id }, data: { access, accessUsers } });
+
+        return {
+          ok: true,
+          message: args.revoke
+            ? `Accesso ai documenti di ${contactLabel} revocato a ${userLabel}.`
+            : `Accesso ai documenti di ${contactLabel} concesso a ${userLabel} (${args.permission === 'write' ? 'accesso completo' : 'sola lettura'}).`,
+          navigateTo: `/cloud?contactId=${contact.id}`,
+          navigateLabel: `Apri i documenti di ${contactLabel}`,
+        };
+      },
+    },
   ],
 });

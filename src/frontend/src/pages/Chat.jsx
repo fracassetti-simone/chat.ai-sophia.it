@@ -788,12 +788,12 @@ export default function Chat() {
     if (!pendingLearning) return;
     setApplyingLearning(true);
     try {
-      const { field } = await api(`/training-chat/${id}/apply`, {
+      const { agentName } = await api(`/training-chat/${id}/apply`, {
         method: 'POST',
         body: { learning: pendingLearning.content, field: 'mainPrompt' },
       });
       setPendingLearning(null);
-      toast.info('Prompt di addestramento aggiornato');
+      toast.info(agentName ? `Prompt aggiornato per l'agente "${agentName}"` : 'Prompt di addestramento aggiornato');
     } catch (err) { toast.error(err.message); } finally { setApplyingLearning(false); }
   };
 

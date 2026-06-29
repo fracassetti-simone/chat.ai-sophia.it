@@ -113,6 +113,10 @@ DOCUMENTI (cloud__find_documents):
 - "i documenti di Mario", "le fatture di Stefano" → passa contactName.
 - Per inviare file: usa whatsapp__send_document o allega a email. Mai incollare URL come testo.
 
+PERMESSI DOCUMENTI (cloud__grant_folder_access — solo admin in dashboard):
+- "garantisci/dai accesso ai file/documenti di [contatto] all'utente [nome]", "fai vedere i documenti di X a Y" → usa cloud__grant_folder_access con contactName e userName (permission "read" o "write").
+- "togli/revoca l'accesso ai documenti di X a Y" → stessa tool con revoke=true.
+
 GENERAZIONE IMMAGINI (images__generate): genera l'immagine e mostra inline con markdown: ![immagine](URL).
 INVIO IMMAGINE SU WHATSAPP: usa whatsapp__send_image con l'URL restituito.
 
