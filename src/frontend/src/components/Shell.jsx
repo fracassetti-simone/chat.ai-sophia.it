@@ -61,14 +61,14 @@ export default function Shell() {
         </div>
         <nav className="sidebar-nav">
 
-          {/* ── Dati (database visibili in sidebar — solo se modulo attivo e schemi visibili) ── */}
-          {!isSuper && <DatiGroup enabledModules={enabledModules}/>}
-
           {/* ── Generale ── */}
           <div className="nav-section">
             <div className="nav-section-label">Generale</div>
             <NavLink to="/" end className="nav-item"><LayoutDashboard size={17} strokeWidth={1.75}/><span>Dashboard</span></NavLink>
           </div>
+
+          {/* ── Dati (database visibili in sidebar — solo se modulo attivo e schemi visibili) ── */}
+          {!isSuper && <DatiGroup enabledModules={enabledModules}/>}
 
           {/* ── Comunicazione (tutti i ruoli con tenant) ── */}
           {(isSuper ? hasTenant : true) && (

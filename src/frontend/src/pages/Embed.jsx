@@ -156,14 +156,40 @@ export default function Embed() {
 }
 
 function WidgetPreview({ embed }) {
+  const color = embed.primaryColor || '#2563eb';
+  const title = embed.title || 'Assistente';
+  const welcome = embed.welcomeMessage || 'Ciao! Come posso aiutarti?';
   return (
     <div className="widget-preview" style={{ marginTop: 20 }}>
       <p className="panel-title" style={{ marginBottom: 10 }}>Anteprima</p>
-      <div style={{ position: 'relative', height: 100, background: 'var(--gray-50)', borderRadius: 10, border: '1px solid var(--border)' }}>
-        <div className="widget-preview-bubble" style={{ background: embed.primaryColor }}>
+      <div className="widget-preview-stage">
+        {/* Pannello chat aperto */}
+        <div className="widget-preview-panel">
+          <div className="widget-preview-header" style={{ background: color }}>
+            <div className="widget-preview-avatar">
+              {embed.logoUrl
+                ? <img src={embed.logoUrl} alt="logo" />
+                : <span>{title.charAt(0).toUpperCase()}</span>}
+            </div>
+            <div className="widget-preview-htext">
+              <strong>{title}</strong>
+              <span>Online</span>
+            </div>
+          </div>
+          <div className="widget-preview-body">
+            <div className="widget-preview-msg">{welcome}</div>
+          </div>
+          <div className="widget-preview-input">
+            <span>Scrivi un messaggio…</span>
+            <div className="widget-preview-send" style={{ background: color }} />
+          </div>
+        </div>
+
+        {/* Launcher */}
+        <div className="widget-preview-bubble" style={{ background: color }}>
           {embed.logoUrl
-            ? <img src={embed.logoUrl} alt="logo" style={{ width: 22, height: 22, borderRadius: 4, objectFit: 'contain' }} />
-            : <span style={{ color: '#fff', fontSize: 18, fontWeight: 700 }}>S</span>}
+            ? <img src={embed.logoUrl} alt="logo" style={{ width: 24, height: 24, borderRadius: 4, objectFit: 'contain' }} />
+            : <span style={{ color: '#fff', fontSize: 20, fontWeight: 700 }}>{title.charAt(0).toUpperCase()}</span>}
         </div>
       </div>
     </div>

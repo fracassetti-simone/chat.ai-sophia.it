@@ -708,7 +708,12 @@ function SchemaEditor({ schema, onBack, onSaved }) {
 
     setSaving(true);
     try {
-      const body = { name, description, icon, showInSidebar, accessLevel, defaultRecordAccess, fields };
+      const body = {
+        name, description, icon, showInSidebar,
+        access, defaultRecordAccess,
+        accessUsers: accessHasSelected ? accessUsers : [],
+        fields,
+      };
       if (schema?.id) {
         await api(`/db/schemas/${schema.id}`, { method: 'PATCH', body });
         toast.info('Database aggiornato');
@@ -800,21 +805,27 @@ function SchemaEditor({ schema, onBack, onSaved }) {
         <div style={{ position: 'sticky', top: 20 }}>
           <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 20, marginBottom: 16 }}>
             <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 16 }}>Accesso al database</div>
-            <AccessPicker
-              value={accessLevel}
-              onChange={setAccessLevel}
-              label="Chi può vedere questo database"
+            <MultiAccessPicker
+              value={access}
+              onChange={setAccess}
+              label="Chi può accedere a questo database"
             />
           </div>
-          <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 20 }}>
+          <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 20, marginBottom: 16 }}>
             <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 16 }}>Accesso predefinito record</div>
-            <AccessPicker
+            <MultiAccessPicker
               value={defaultRecordAccess}
               onChange={setDefaultRecordAccess}
               label="Accessibilità predefinita dei nuovi record"
               hint="Può essere cambiata singolarmente su ogni record"
             />
           </div>
+          {accessHasSelected && (
+            <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 20 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 16 }}>Utenti specifici</div>
+              <UserPicker selected={accessUsers} onChange={setAccessUsers} />
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -834,16 +845,24 @@ function RecordEditor({ record, schema, onBack, onSaved, canWrite }) {
     for (const f of fields) init[f.id || f.name] = record?.data?.[f.id || f.name] ?? '';
     return init;
   });
-  const [accessLevel, setAccessLevel] = useState(record?.accessLevel || schema.defaultRecordAccess || 'admin');
-  const [accessUsers, setAccessUsers] = useState(record?.accessUsers || []);
+  const [access, setAccess] = useState(
+    record?.id
+      ? getAccess(record)
+      : ((Array.isArray(schema.defaultRecordAccess) && schema.defaultRecordAccess.length)
+          ? schema.defaultRecordAccess
+          : getAccess({ accessLevel: typeof schema.defaultRecordAccess === 'string' ? schema.defaultRecordAccess : 'admin' }))
+  );
+  const [accessUsers, setAccessUsers] = useState(record?.accessUsers || schema?.accessUsers || []);
   const [saving, setSaving] = useState(false);
+
+  const accessHasSelected = access.some(a => a.audience === 'selected');
 
   const set = (key, val) => setData(d => ({ ...d, [key]: val }));
 
   const save = async () => {
     setSaving(true);
     try {
-      const body = { data, accessLevel, accessUsers: accessLevel === 'admin_selected' ? accessUsers : [] };
+      const body = { data, access, accessUsers: accessHasSelected ? accessUsers : [] };
       if (record?.id) {
         await api(`/db/schemas/${schema.id}/records/${record.id}`, { method: 'PATCH', body });
         toast.info('Record aggiornato');
@@ -951,10 +970,11 @@ function RecordEditor({ record, schema, onBack, onSaved, canWrite }) {
           <div style={{ position: 'sticky', top: 20 }}>
             <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 20, marginBottom: 16 }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 16 }}>Accessibile a</div>
-              <AccessPicker value={accessLevel} onChange={setAccessLevel} />
+              <MultiAccessPicker value={access} onChange={setAccess} label="Chi può accedere a questo record" />
             </div>
-            {accessLevel === 'admin_selected' && (
+            {accessHasSelected && (
               <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 20 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 16 }}>Utenti specifici</div>
                 <UserPicker selected={accessUsers} onChange={setAccessUsers} />
               </div>
             )}
@@ -962,7 +982,7 @@ function RecordEditor({ record, schema, onBack, onSaved, canWrite }) {
         ) : (
           <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 16 }}>
             <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 8 }}>ACCESSIBILE A</div>
-            <AccessBadge value={accessLevel} />
+            <AccessBadge access={access} />
           </div>
         )}
       </div>
@@ -1047,7 +1067,7 @@ function SchemaList({ onSelect, onNew }) {
                   <IonIcon name={s.icon || 'server-outline'} size={18} style={{ color: 'var(--primary)' }} />
                   <span className="flow-name">{s.name}</span>
                   {s.showInSidebar && <span className="badge badge-on" style={{ fontSize: 10 }}>Sidebar</span>}
-                  <AccessBadge value={s.accessLevel} />
+                  <AccessBadge access={getAccess(s)} />
                   {s.description && <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{s.description}</span>}
                 </div>
                 <div className="flow-actions" onClick={e => e.stopPropagation()}>
@@ -1143,7 +1163,8 @@ function RecordView({ initialSchema, onBack, onEditStructure }) {
   }
 
   const fields = schema.fields || [];
-  const tableFields = fields.slice(0, 4);
+  // Solo i campi marcati come visibili nell'anteprima (default: visibili), max 4 colonne.
+  const tableFields = fields.filter(f => f.inTable !== false).slice(0, 4);
 
   return (
     <div>
@@ -1162,7 +1183,7 @@ function RecordView({ initialSchema, onBack, onEditStructure }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <h1 style={{ fontSize: 20, fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
             {schema.name}
-            <AccessBadge value={schema.accessLevel} />
+            <AccessBadge access={getAccess(schema)} />
           </h1>
           <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: 0 }}>{total} record</p>
         </div>
@@ -1213,7 +1234,6 @@ function RecordView({ initialSchema, onBack, onEditStructure }) {
                       {f.label}
                     </th>
                   ))}
-                  <th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: 600, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>Accessibile a</th>
                   <th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: 600, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>Aggiornato</th>
                   <th style={{ width: 110 }} />
                 </tr>
@@ -1230,7 +1250,6 @@ function RecordView({ initialSchema, onBack, onEditStructure }) {
                         </td>
                       );
                     })}
-                    <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}><AccessBadge value={r.accessLevel} /></td>
                     <td style={{ padding: '10px 14px', color: 'var(--text-muted)', whiteSpace: 'nowrap', fontSize: 11 }}>{fmtDate(r.updatedAt)}</td>
                     <td style={{ padding: '6px 10px', whiteSpace: 'nowrap' }}>
                       <div style={{ display: 'flex', gap: 4 }}>
