@@ -31,11 +31,62 @@ import { emitToTenant } from '../realtime/io.js';
 const router = Router();
 router.use(authenticate, tenantScope, requireTenant);
 
-// ── Access level constants ────────────────────────────────────────────────────
-const ACCESS_ADMIN          = 'admin';
-const ACCESS_ADMIN_USERS    = 'admin_users';
-const ACCESS_ADMIN_SELECTED = 'admin_selected';
-const VALID_ACCESS = [ACCESS_ADMIN, ACCESS_ADMIN_USERS, ACCESS_ADMIN_SELECTED];
+// ── Access model (multi-target con permessi) ──────────────────────────────────
+// Nuovo modello: array di grant { target, perm }
+//   target: 'admin' | 'users' | 'selected' | 'external'
+//   perm:   'read' | 'write'
+// Memorizzato come JSON-string nelle colonne String accessLevel / defaultRecordAccess.
+// Retro-compatibile con i vecchi valori string ('admin', 'admin_users', 'admin_selected').
+const ACCESS_TARGETS = ['admin', 'users', 'selected', 'external'];
+
+function legacyToGrants(level) {
+  switch (level) {
+    case 'admin_users':    return [{ target: 'admin', perm: 'write' }, { target: 'users', perm: 'write' }];
+    case 'admin_selected': return [{ target: 'admin', perm: 'write' }, { target: 'selected', perm: 'write' }];
+    case 'admin':
+    default:               return [{ target: 'admin', perm: 'write' }];
+  }
+}
+
+/** Interpreta un valore (array, JSON-string o legacy-string) come array di grant. */
+function parseGrants(raw) {
+  let val = raw;
+  if (typeof raw === 'string') {
+    const t = raw.trim();
+    if (t.startsWith('[')) { try { val = JSON.parse(t); } catch { val = t; } }
+    else return legacyToGrants(t);
+  }
+  if (Array.isArray(val)) {
+    const out = val
+      .filter(g => g && ACCESS_TARGETS.includes(g.target))
+      .map(g => ({ target: g.target, perm: g.perm === 'write' ? 'write' : 'read' }));
+    return out.length ? out : legacyToGrants('admin');
+  }
+  return legacyToGrants('admin');
+}
+
+/** Normalizza grant in arrivo dal client (admin sempre presente, target unici). */
+function sanitizeGrants(input) {
+  if (!Array.isArray(input)) return null;
+  const seen = new Set();
+  const out = [];
+  for (const g of input) {
+    if (!g || !ACCESS_TARGETS.includes(g.target) || seen.has(g.target)) continue;
+    seen.add(g.target);
+    out.push({ target: g.target, perm: g.perm === 'write' ? 'write' : 'read' });
+  }
+  if (!out.some(g => g.target === 'admin')) out.unshift({ target: 'admin', perm: 'write' });
+  return out;
+}
+
+/** Estrae grant da un valore del body (array → sanitize, string → parse, altro → null). */
+function grantsFromBody(value) {
+  if (Array.isArray(value)) return sanitizeGrants(value);
+  if (typeof value === 'string' && value) return parseGrants(value);
+  return null;
+}
+
+function serializeGrants(grants) { return JSON.stringify(grants || legacyToGrants('admin')); }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -59,35 +110,44 @@ async function assertModuleActive(req) {
   return cfg;
 }
 
-async function canManageSchemas(req, cfg) {
-  if (isSuperAdmin(req)) return true;
-  return !!(cfg?.adminCanCreate);
-}
+// Admin e super admin gestiscono sempre tutto (creano/modificano database e record).
+async function canManageSchemas(req) { return isAdmin(req); }
+async function canWriteRecords(req)  { return isAdmin(req); }
 
-async function canWriteRecords(req, cfg) {
-  if (isSuperAdmin(req)) return true;
-  return !!(cfg?.adminCanWrite);
+/**
+ * Permesso effettivo dell'utente corrente su un'entità (schema o record).
+ * Ritorna 'write' | 'read' | null. Gli utenti esterni non passano da queste rotte.
+ */
+function accessFor(req, rawAccess, accessUsers) {
+  if (isAdmin(req)) return 'write';
+  const grants = parseGrants(rawAccess);
+  let best = null;
+  for (const g of grants) {
+    let applies = false;
+    if (g.target === 'users') applies = true;
+    else if (g.target === 'selected') applies = Array.isArray(accessUsers) && accessUsers.includes(req.user.id);
+    // 'admin' gestito sopra, 'external' non si applica agli utenti autenticati
+    if (applies) {
+      if (g.perm === 'write') return 'write';
+      best = best || 'read';
+    }
+  }
+  return best;
 }
 
 /** Verifica se l'utente corrente può vedere uno schema */
 function userCanSeeSchema(req, schema) {
-  if (isSuperAdmin(req)) return true;
-  const level = schema.accessLevel || ACCESS_ADMIN;
-  if (level === ACCESS_ADMIN_USERS) return true; // tutti gli utenti del tenant
-  if (level === ACCESS_ADMIN) return isAdmin(req);
-  return isAdmin(req); // admin_selected per schemi: solo admin vede sempre
+  return accessFor(req, schema.accessLevel, []) != null;
 }
 
 /** Verifica se l'utente corrente può vedere un record */
 function userCanSeeRecord(req, record) {
-  if (isSuperAdmin(req)) return true;
-  const level = record.accessLevel || ACCESS_ADMIN;
-  if (level === ACCESS_ADMIN_USERS) return true;
-  if (level === ACCESS_ADMIN_SELECTED) {
-    const users = Array.isArray(record.accessUsers) ? record.accessUsers : [];
-    return isAdmin(req) || users.includes(req.user.id);
-  }
-  return isAdmin(req); // ACCESS_ADMIN
+  return accessFor(req, record.accessLevel, record.accessUsers) != null;
+}
+
+/** Verifica se l'utente corrente può modificare un record */
+function userCanEditRecord(req, record) {
+  return accessFor(req, record.accessLevel, record.accessUsers) === 'write';
 }
 
 // ── Field validation ──────────────────────────────────────────────────────────
@@ -99,6 +159,8 @@ function normalizeFields(rawFields) {
     label:    (f.label || f.name || '').trim(),
     type:     f.type || 'string',
     required: !!f.required,
+    // Visibilità nell'anteprima tabella: default true se non specificato
+    showInTable: f.showInTable === undefined ? true : !!f.showInTable,
     ...(f.regex !== undefined && f.regex !== null && f.regex !== '' ? { regex: f.regex } : {}),
     ...(f.min !== undefined && f.min !== null ? { min: Number(f.min) } : {}),
     ...(f.max !== undefined && f.max !== null ? { max: Number(f.max) } : {}),
@@ -151,11 +213,14 @@ router.get('/schemas', asyncHandler(async (req, res) => {
 }));
 
 router.post('/schemas', asyncHandler(async (req, res) => {
-  const cfg = await assertModuleActive(req);
-  if (!await canManageSchemas(req, cfg)) throw forbidden('Non hai il permesso di creare database.');
+  await assertModuleActive(req);
+  if (!await canManageSchemas(req)) throw forbidden('Non hai il permesso di creare database.');
 
-  const { name, description, icon, showInSidebar, fields: rawFields, accessLevel, defaultRecordAccess } = req.body;
+  const { name, description, icon, showInSidebar, fields: rawFields, access, accessLevel, defaultRecordAccess } = req.body;
   if (!name?.trim()) throw badRequest('Nome obbligatorio');
+
+  const accessGrants  = grantsFromBody(access ?? accessLevel) || legacyToGrants('admin');
+  const defaultGrants = grantsFromBody(defaultRecordAccess) || legacyToGrants('admin');
 
   const schema = await prisma.dbSchema.create({
     data: {
@@ -164,8 +229,8 @@ router.post('/schemas', asyncHandler(async (req, res) => {
       description: description?.trim() || '',
       icon: icon?.trim() || 'server-outline',
       showInSidebar: !!showInSidebar,
-      accessLevel: VALID_ACCESS.includes(accessLevel) ? accessLevel : ACCESS_ADMIN,
-      defaultRecordAccess: VALID_ACCESS.includes(defaultRecordAccess) ? defaultRecordAccess : ACCESS_ADMIN,
+      accessLevel: serializeGrants(accessGrants),
+      defaultRecordAccess: serializeGrants(defaultGrants),
       fields: normalizeFields(rawFields),
     },
   });
@@ -183,20 +248,22 @@ router.get('/schemas/:id', asyncHandler(async (req, res) => {
 }));
 
 router.patch('/schemas/:id', asyncHandler(async (req, res) => {
-  const cfg = await assertModuleActive(req);
-  if (!await canManageSchemas(req, cfg)) throw forbidden('Non hai il permesso di modificare database.');
+  await assertModuleActive(req);
+  if (!await canManageSchemas(req)) throw forbidden('Non hai il permesso di modificare database.');
 
   const existing = await prisma.dbSchema.findFirst({ where: { id: req.params.id, tenantId: req.tenantId } });
   if (!existing) throw notFound('Database non trovato');
 
-  const { name, description, icon, showInSidebar, fields: rawFields, accessLevel, defaultRecordAccess } = req.body;
+  const { name, description, icon, showInSidebar, fields: rawFields, access, accessLevel, defaultRecordAccess } = req.body;
   const update = { updatedAt: new Date() };
   if (name?.trim())                        update.name                = name.trim();
   if (description !== undefined)           update.description         = description?.trim() || '';
   if (icon?.trim())                        update.icon                = icon.trim();
   if (showInSidebar !== undefined)         update.showInSidebar       = !!showInSidebar;
-  if (VALID_ACCESS.includes(accessLevel))  update.accessLevel         = accessLevel;
-  if (VALID_ACCESS.includes(defaultRecordAccess)) update.defaultRecordAccess = defaultRecordAccess;
+  const incomingAccess  = grantsFromBody(access ?? accessLevel);
+  if (incomingAccess)  update.accessLevel = serializeGrants(incomingAccess);
+  const incomingDefault = grantsFromBody(defaultRecordAccess);
+  if (incomingDefault) update.defaultRecordAccess = serializeGrants(incomingDefault);
   if (Array.isArray(rawFields)) {
     const existingFields = existing.fields || [];
     update.fields = normalizeFields(rawFields).map(nf => {
@@ -211,8 +278,8 @@ router.patch('/schemas/:id', asyncHandler(async (req, res) => {
 }));
 
 router.delete('/schemas/:id', asyncHandler(async (req, res) => {
-  const cfg = await assertModuleActive(req);
-  if (!await canManageSchemas(req, cfg)) throw forbidden('Non hai il permesso di eliminare database.');
+  await assertModuleActive(req);
+  if (!await canManageSchemas(req)) throw forbidden('Non hai il permesso di eliminare database.');
 
   const existing = await prisma.dbSchema.findFirst({ where: { id: req.params.id, tenantId: req.tenantId } });
   if (!existing) throw notFound('Database non trovato');
@@ -255,8 +322,8 @@ router.get('/schemas/:id/records', asyncHandler(async (req, res) => {
 }));
 
 router.post('/schemas/:id/records', asyncHandler(async (req, res) => {
-  const cfg = await assertModuleActive(req);
-  if (!await canWriteRecords(req, cfg)) throw forbidden('Non hai il permesso di creare record.');
+  await assertModuleActive(req);
+  if (!await canWriteRecords(req)) throw forbidden('Non hai il permesso di creare record.');
 
   const schema = await prisma.dbSchema.findFirst({ where: { id: req.params.id, tenantId: req.tenantId } });
   if (!schema) throw notFound('Database non trovato');
@@ -264,7 +331,7 @@ router.post('/schemas/:id/records', asyncHandler(async (req, res) => {
 
   const fields = schema.fields || [];
   const data = req.body?.data || {};
-  const accessLevel = VALID_ACCESS.includes(req.body?.accessLevel) ? req.body.accessLevel : (schema.defaultRecordAccess || ACCESS_ADMIN);
+  const accessGrants = grantsFromBody(req.body?.access ?? req.body?.accessLevel) || parseGrants(schema.defaultRecordAccess);
   const accessUsers = Array.isArray(req.body?.accessUsers) ? req.body.accessUsers : [];
 
   const errors = validateRecordData(fields, data);
@@ -277,7 +344,7 @@ router.post('/schemas/:id/records', asyncHandler(async (req, res) => {
   }
 
   const record = await prisma.dbRecord.create({
-    data: { schemaId: schema.id, tenantId: req.tenantId, data: cleaned, accessLevel, accessUsers },
+    data: { schemaId: schema.id, tenantId: req.tenantId, data: cleaned, accessLevel: serializeGrants(accessGrants), accessUsers },
   });
 
   emitToTenant(req.tenantId, 'db:record:created', { schemaId: schema.id, record });
@@ -295,8 +362,7 @@ router.get('/schemas/:id/records/:rid', asyncHandler(async (req, res) => {
 }));
 
 router.patch('/schemas/:id/records/:rid', asyncHandler(async (req, res) => {
-  const cfg = await assertModuleActive(req);
-  if (!await canWriteRecords(req, cfg)) throw forbidden('Non hai il permesso di modificare record.');
+  await assertModuleActive(req);
 
   const schema = await prisma.dbSchema.findFirst({ where: { id: req.params.id, tenantId: req.tenantId } });
   if (!schema) throw notFound('Database non trovato');
@@ -305,7 +371,7 @@ router.patch('/schemas/:id/records/:rid', asyncHandler(async (req, res) => {
     where: { id: req.params.rid, schemaId: schema.id, tenantId: req.tenantId },
   });
   if (!record) throw notFound('Record non trovato');
-  if (!userCanSeeRecord(req, record)) throw forbidden('Accesso negato');
+  if (!userCanEditRecord(req, record)) throw forbidden('Non hai il permesso di modificare questo record.');
 
   const fields = schema.fields || [];
   const patch = req.body?.data || {};
@@ -321,8 +387,12 @@ router.patch('/schemas/:id/records/:rid', asyncHandler(async (req, res) => {
   if (errors.length) throw badRequest(errors.join('; '));
 
   const updateData = { data: cleaned, updatedAt: new Date() };
-  if (VALID_ACCESS.includes(req.body?.accessLevel)) updateData.accessLevel = req.body.accessLevel;
-  if (Array.isArray(req.body?.accessUsers)) updateData.accessUsers = req.body.accessUsers;
+  // Solo gli admin possono cambiare l'accessibilità di un record
+  if (isAdmin(req)) {
+    const incomingAccess = grantsFromBody(req.body?.access ?? req.body?.accessLevel);
+    if (incomingAccess) updateData.accessLevel = serializeGrants(incomingAccess);
+    if (Array.isArray(req.body?.accessUsers)) updateData.accessUsers = req.body.accessUsers;
+  }
 
   const updated = await prisma.dbRecord.update({ where: { id: record.id }, data: updateData });
 
@@ -331,13 +401,13 @@ router.patch('/schemas/:id/records/:rid', asyncHandler(async (req, res) => {
 }));
 
 router.delete('/schemas/:id/records/:rid', asyncHandler(async (req, res) => {
-  const cfg = await assertModuleActive(req);
-  if (!await canWriteRecords(req, cfg)) throw forbidden('Non hai il permesso di eliminare record.');
+  await assertModuleActive(req);
 
   const record = await prisma.dbRecord.findFirst({
     where: { id: req.params.rid, schemaId: req.params.id, tenantId: req.tenantId },
   });
   if (!record) throw notFound('Record non trovato');
+  if (!userCanEditRecord(req, record)) throw forbidden('Non hai il permesso di eliminare questo record.');
 
   await prisma.dbRecord.delete({ where: { id: record.id } });
   emitToTenant(req.tenantId, 'db:record:deleted', { schemaId: req.params.id, id: record.id });

@@ -89,13 +89,45 @@ function recordMatchesQuery(record, query) {
 
 // ── Controlla se l'utente ha permesso di scrittura ───────────────────────────
 function canWrite(ctx) {
-  if (ctx.userRole === 'SUPER_ADMIN') return true;
+  if (ctx.userRole === 'SUPER_ADMIN' || ctx.userRole === 'ADMIN') return true;
   return !!(ctx.config?.adminCanWrite);
 }
 
 function canCreate(ctx) {
-  if (ctx.userRole === 'SUPER_ADMIN') return true;
+  if (ctx.userRole === 'SUPER_ADMIN' || ctx.userRole === 'ADMIN') return true;
   return !!(ctx.config?.adminCanCreate);
+}
+
+// ── Access model (allineato a routes/db.js) ──────────────────────────────────
+const ACCESS_TARGETS = ['admin', 'users', 'selected', 'external'];
+function legacyToGrants(level) {
+  switch (level) {
+    case 'admin_users':    return [{ target: 'admin', perm: 'write' }, { target: 'users', perm: 'write' }];
+    case 'admin_selected': return [{ target: 'admin', perm: 'write' }, { target: 'selected', perm: 'write' }];
+    default:               return [{ target: 'admin', perm: 'write' }];
+  }
+}
+function parseGrants(raw) {
+  let val = raw;
+  if (typeof raw === 'string') {
+    const t = raw.trim();
+    if (t.startsWith('[')) { try { val = JSON.parse(t); } catch { val = t; } }
+    else return legacyToGrants(t);
+  }
+  if (Array.isArray(val)) {
+    const out = val.filter(g => g && ACCESS_TARGETS.includes(g.target))
+      .map(g => ({ target: g.target, perm: g.perm === 'write' ? 'write' : 'read' }));
+    return out.length ? out : legacyToGrants('admin');
+  }
+  return legacyToGrants('admin');
+}
+/** L'AI opera in un contesto esterno (widget / chat esterne)? */
+function isExternalCtx(ctx) {
+  return !!ctx.externalChatId || ctx.source === 'WIDGET' || ctx.source === 'WHATSAPP';
+}
+/** Verifica se un'entità concede accesso agli utenti esterni. */
+function grantedToExternal(rawAccess) {
+  return parseGrants(rawAccess).some(g => g.target === 'external');
 }
 
 export default defineModule({
@@ -116,11 +148,13 @@ export default defineModule({
       description: 'Elenca tutti i database/tabelle disponibili per questo tenant. Usalo per sapere quali database esistono prima di cercare record.',
       parameters: { type: 'object', properties: {}, required: [] },
       async handler(ctx) {
-        const schemas = await ctx.prisma.dbSchema.findMany({
+        let schemas = await ctx.prisma.dbSchema.findMany({
           where: { tenantId: ctx.tenantId },
-          select: { id: true, name: true, icon: true, description: true, fields: true, showInSidebar: true },
+          select: { id: true, name: true, icon: true, description: true, fields: true, showInSidebar: true, accessLevel: true },
           orderBy: { name: 'asc' },
         });
+        // In contesto esterno mostra solo i database accessibili agli utenti esterni
+        if (isExternalCtx(ctx)) schemas = schemas.filter(s => grantedToExternal(s.accessLevel));
         return {
           schemas: schemas.map(s => ({
             id: s.id,
@@ -176,7 +210,14 @@ export default defineModule({
           take: 200, // filtriamo in memoria per ricerca full-text
         });
 
-        // L'AI accede come super admin — vede tutti i record indipendentemente dall'accessLevel
+        // In contesto interno l'AI vede tutti i record; in contesto esterno solo
+        // quelli (e gli schemi) accessibili agli utenti esterni.
+        if (isExternalCtx(ctx)) {
+          if (!grantedToExternal(schema.accessLevel)) {
+            return { ok: false, message: `Database "${schema.name}" non accessibile.` };
+          }
+          records = records.filter(r => grantedToExternal(r.accessLevel));
+        }
 
         // Filtra per query generica
         if (args.query?.trim()) {

@@ -14,7 +14,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   Plus, Trash2, Pencil, Save, X, Search, ChevronLeft,
   Settings, Database as DbIcon, Eye, Check, Lock, Users, UserCheck,
-  GripVertical, ChevronDown, ArrowLeft,
+  GripVertical, ChevronDown, ArrowLeft, Globe,
 } from 'lucide-react';
 import { api } from '../lib/api.js';
 import { useToast } from '../context/ToastContext.jsx';
@@ -23,11 +23,44 @@ import { useAuth } from '../context/AuthContext.jsx';
 
 // ─── Costanti ─────────────────────────────────────────────────────────────────
 
-const ACCESS_LEVELS = [
-  { value: 'admin',          label: 'Solo admin',                  icon: Lock,      hint: 'Solo admin e super admin' },
-  { value: 'admin_users',    label: 'Admin e tutti gli utenti',    icon: Users,     hint: 'Visibile a tutti gli utenti del tenant' },
-  { value: 'admin_selected', label: 'Admin e utenti selezionati',  icon: UserCheck, hint: 'Scegli manualmente chi può accedere' },
+// Destinatari dell'accesso (scelta multipla, ognuno con permesso read/write)
+const ACCESS_TARGETS = [
+  { value: 'admin',    label: 'Admin',            icon: Lock,      hint: 'Admin e super admin — sempre accesso completo', locked: true },
+  { value: 'users',    label: 'Tutti gli utenti', icon: Users,     hint: 'Tutti gli utenti del tenant' },
+  { value: 'selected', label: 'Utenti specifici', icon: UserCheck, hint: 'Solo gli utenti che selezioni' },
+  { value: 'external', label: 'Utenti esterni',   icon: Globe,     hint: 'Utenti del widget e delle chat esterne' },
 ];
+
+const ACCESS_TARGET_VALUES = ACCESS_TARGETS.map(t => t.value);
+
+// ─── Access grants — helpers (allineati al backend) ───────────────────────────
+
+function legacyToGrants(level) {
+  switch (level) {
+    case 'admin_users':    return [{ target: 'admin', perm: 'write' }, { target: 'users', perm: 'write' }];
+    case 'admin_selected': return [{ target: 'admin', perm: 'write' }, { target: 'selected', perm: 'write' }];
+    default:               return [{ target: 'admin', perm: 'write' }];
+  }
+}
+
+/** Interpreta un valore (array, JSON-string o legacy-string) come array di grant. */
+function parseGrants(raw) {
+  let val = raw;
+  if (typeof raw === 'string') {
+    const t = raw.trim();
+    if (t.startsWith('[')) { try { val = JSON.parse(t); } catch { val = t; } }
+    else return legacyToGrants(t);
+  }
+  if (Array.isArray(val)) {
+    const out = val
+      .filter(g => g && ACCESS_TARGET_VALUES.includes(g.target))
+      .map(g => ({ target: g.target, perm: g.perm === 'write' ? 'write' : 'read' }));
+    return out.length ? out : legacyToGrants('admin');
+  }
+  return legacyToGrants('admin');
+}
+
+function hasTarget(grants, target) { return (grants || []).some(g => g.target === target); }
 
 const FIELD_TYPES = [
   { value: 'string',  label: 'Testo breve',      desc: 'Fino a ~255 caratteri, con regex opzionale' },
@@ -71,17 +104,24 @@ function toSlug(str) {
 // ─── AccessBadge (solo display) ───────────────────────────────────────────────
 
 function AccessBadge({ value }) {
-  const a = ACCESS_LEVELS.find(x => x.value === value) || ACCESS_LEVELS[0];
-  const Icon = a.icon;
-  const colors = {
-    admin:          { bg: 'var(--gray-100,#f3f4f6)', color: 'var(--text-muted,#6b7280)' },
-    admin_users:    { bg: '#eff6ff', color: '#1d4ed8' },
-    admin_selected: { bg: '#faf5ff', color: '#7e22ce' },
-  };
-  const c = colors[value] || colors.admin;
+  const grants = parseGrants(value);
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 500, background: c.bg, color: c.color }}>
-      <Icon size={10} /> {a.label}
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+      {grants.map(g => {
+        const t = ACCESS_TARGETS.find(x => x.value === g.target) || ACCESS_TARGETS[0];
+        const Icon = t.icon;
+        const write = g.perm === 'write';
+        return (
+          <span key={g.target} title={write ? 'Lettura e scrittura' : 'Sola lettura'} style={{
+            display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 20,
+            fontSize: 11, fontWeight: 500,
+            background: write ? '#eff6ff' : 'var(--gray-100,#f3f4f6)',
+            color: write ? '#1d4ed8' : 'var(--text-muted,#6b7280)',
+          }}>
+            <Icon size={10} /> {t.label}{!write && ' · sola lettura'}
+          </span>
+        );
+      })}
     </span>
   );
 }
@@ -290,39 +330,82 @@ function IconPicker({ value, onChange }) {
 // ─── AccessPicker custom (radio group) ───────────────────────────────────────
 
 function AccessPicker({ value, onChange, label = 'Accessibile a', hint }) {
+  const grants = Array.isArray(value) ? value : parseGrants(value);
+  const permOf = target => grants.find(g => g.target === target)?.perm || null;
+
+  const setTarget = (target, perm) => {
+    let next = grants.filter(g => g.target !== target);
+    if (perm) next = [...next, { target, perm }];
+    if (!next.some(g => g.target === 'admin')) next = [{ target: 'admin', perm: 'write' }, ...next];
+    onChange(next);
+  };
+
   return (
     <div>
       <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>{label}</div>
-      {hint && <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>{hint}</div>}
+      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
+        {hint || 'Seleziona uno o più destinatari e imposta il permesso di ciascuno.'}
+      </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        {ACCESS_LEVELS.map(a => {
-          const sel = value === a.value;
-          const Icon = a.icon;
+        {ACCESS_TARGETS.map(t => {
+          const locked = !!t.locked;
+          const perm = locked ? 'write' : permOf(t.value);
+          const enabled = !!perm;
+          const Icon = t.icon;
           return (
-            <button
-              key={a.value}
-              type="button"
-              onClick={() => onChange(a.value)}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px',
-                border: `2px solid ${sel ? 'var(--primary)' : 'var(--border)'}`,
-                borderRadius: 10, background: sel ? '#eff6ff' : 'var(--surface)',
-                cursor: 'pointer', textAlign: 'left', transition: 'all .15s',
-              }}
-            >
-              <Icon size={18} style={{ color: sel ? 'var(--primary)' : 'var(--text-muted)', flexShrink: 0 }} />
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 14, fontWeight: 500, color: sel ? 'var(--primary)' : 'var(--text)' }}>{a.label}</div>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{a.hint}</div>
-              </div>
-              <div style={{
-                width: 18, height: 18, borderRadius: 9, border: `2px solid ${sel ? 'var(--primary)' : 'var(--border)'}`,
-                background: sel ? 'var(--primary)' : 'transparent',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-              }}>
-                {sel && <div style={{ width: 6, height: 6, borderRadius: 3, background: '#fff' }} />}
-              </div>
-            </button>
+            <div key={t.value} style={{
+              border: `2px solid ${enabled ? 'var(--primary)' : 'var(--border)'}`,
+              borderRadius: 10, background: enabled ? '#eff6ff' : 'var(--surface)',
+              padding: '10px 12px', transition: 'all .15s',
+            }}>
+              <button
+                type="button"
+                onClick={() => { if (!locked) setTarget(t.value, enabled ? null : 'read'); }}
+                disabled={locked}
+                style={{
+                  width: '100%', display: 'flex', alignItems: 'center', gap: 12, background: 'none',
+                  border: 'none', padding: 0, textAlign: 'left', cursor: locked ? 'default' : 'pointer',
+                }}
+              >
+                <Icon size={18} style={{ color: enabled ? 'var(--primary)' : 'var(--text-muted)', flexShrink: 0 }} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 14, fontWeight: 500, color: enabled ? 'var(--primary)' : 'var(--text)' }}>{t.label}</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{t.hint}</div>
+                </div>
+                <div style={{
+                  width: 18, height: 18, borderRadius: 4, border: `2px solid ${enabled ? 'var(--primary)' : 'var(--border)'}`,
+                  background: enabled ? 'var(--primary)' : 'transparent',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                  opacity: locked ? 0.6 : 1,
+                }}>
+                  {enabled && <Check size={11} style={{ color: '#fff' }} />}
+                </div>
+              </button>
+              {enabled && (
+                <div style={{ display: 'flex', gap: 6, marginTop: 10, marginLeft: 30 }}>
+                  {[{ p: 'read', l: 'Sola lettura' }, { p: 'write', l: 'Lettura e scrittura' }].map(opt => {
+                    const active = perm === opt.p;
+                    return (
+                      <button
+                        key={opt.p}
+                        type="button"
+                        disabled={locked}
+                        onClick={() => setTarget(t.value, opt.p)}
+                        style={{
+                          padding: '5px 12px', borderRadius: 7, fontSize: 12, fontWeight: 500,
+                          border: `1.5px solid ${active ? 'var(--primary)' : 'var(--border)'}`,
+                          background: active ? 'var(--primary)' : 'var(--surface)',
+                          color: active ? '#fff' : 'var(--text-muted)',
+                          cursor: locked ? 'default' : 'pointer', opacity: locked ? 0.6 : 1,
+                        }}
+                      >
+                        {opt.l}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           );
         })}
       </div>
@@ -546,13 +629,21 @@ function FieldEditor({ field, index, onChange, onRemove }) {
         </div>
       )}
 
-      {/* Obbligatorio */}
-      <Toggle
-        checked={!!field.required}
-        onChange={v => set('required', v)}
-        label="Campo obbligatorio"
-        hint="Il record non può essere salvato senza questo valore"
-      />
+      {/* Obbligatorio + visibilità tabella */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <Toggle
+          checked={!!field.required}
+          onChange={v => set('required', v)}
+          label="Campo obbligatorio"
+          hint="Il record non può essere salvato senza questo valore"
+        />
+        <Toggle
+          checked={field.showInTable !== false}
+          onChange={v => set('showInTable', v)}
+          label="Visibile nell'anteprima tabella"
+          hint="Se attivo, questo campo appare come colonna nella tabella dei record"
+        />
+      </div>
     </div>
   );
 }
@@ -565,8 +656,8 @@ function SchemaEditor({ schema, onBack, onSaved }) {
   const [description, setDescription] = useState(schema?.description || '');
   const [icon, setIcon] = useState(schema?.icon || 'server-outline');
   const [showInSidebar, setShowInSidebar] = useState(schema?.showInSidebar || false);
-  const [accessLevel, setAccessLevel] = useState(schema?.accessLevel || 'admin');
-  const [defaultRecordAccess, setDefaultRecordAccess] = useState(schema?.defaultRecordAccess || 'admin');
+  const [access, setAccess] = useState(parseGrants(schema?.access ?? schema?.accessLevel));
+  const [defaultRecordAccess, setDefaultRecordAccess] = useState(parseGrants(schema?.defaultRecordAccess));
   const [fields, setFields] = useState(
     (schema?.fields || []).map(f => ({ ...f, _nameTouched: !!f.name }))
   );
@@ -574,7 +665,7 @@ function SchemaEditor({ schema, onBack, onSaved }) {
 
   const addField = () => setFields(f => [
     ...f,
-    { id: `f_${Date.now()}`, name: '', label: '', type: 'string', required: false, _nameTouched: false },
+    { id: `f_${Date.now()}`, name: '', label: '', type: 'string', required: false, showInTable: true, _nameTouched: false },
   ]);
   const updateField = (i, u) => setFields(f => f.map((x, j) => j === i ? u : x));
   const removeField = (i) => setFields(f => f.filter((_, j) => j !== i));
@@ -590,7 +681,7 @@ function SchemaEditor({ schema, onBack, onSaved }) {
 
     setSaving(true);
     try {
-      const body = { name, description, icon, showInSidebar, accessLevel, defaultRecordAccess, fields };
+      const body = { name, description, icon, showInSidebar, access, defaultRecordAccess, fields };
       if (schema?.id) {
         await api(`/db/schemas/${schema.id}`, { method: 'PATCH', body });
         toast.info('Database aggiornato');
@@ -683,9 +774,9 @@ function SchemaEditor({ schema, onBack, onSaved }) {
           <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 20, marginBottom: 16 }}>
             <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 16 }}>Accesso al database</div>
             <AccessPicker
-              value={accessLevel}
-              onChange={setAccessLevel}
-              label="Chi può vedere questo database"
+              value={access}
+              onChange={setAccess}
+              label="Chi può accedere a questo database"
             />
           </div>
           <div style={{ background: 'var(--surface)', border: '1.5px solid var(--border)', borderRadius: 14, padding: 20 }}>
@@ -716,7 +807,7 @@ function RecordEditor({ record, schema, onBack, onSaved, canWrite }) {
     for (const f of fields) init[f.id || f.name] = record?.data?.[f.id || f.name] ?? '';
     return init;
   });
-  const [accessLevel, setAccessLevel] = useState(record?.accessLevel || schema.defaultRecordAccess || 'admin');
+  const [access, setAccess] = useState(parseGrants(record?.access ?? record?.accessLevel ?? schema.defaultRecordAccess));
   const [accessUsers, setAccessUsers] = useState(record?.accessUsers || []);
   const [saving, setSaving] = useState(false);
 
@@ -725,7 +816,7 @@ function RecordEditor({ record, schema, onBack, onSaved, canWrite }) {
   const save = async () => {
     setSaving(true);
     try {
-      const body = { data, accessLevel, accessUsers: accessLevel === 'admin_selected' ? accessUsers : [] };
+      const body = { data, access, accessUsers: hasTarget(access, 'selected') ? accessUsers : [] };
       if (record?.id) {
         await api(`/db/schemas/${schema.id}/records/${record.id}`, { method: 'PATCH', body });
         toast.info('Record aggiornato');
