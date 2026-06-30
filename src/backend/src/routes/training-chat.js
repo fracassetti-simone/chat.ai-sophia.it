@@ -9,6 +9,7 @@ import { asyncHandler, notFound, forbidden } from '../utils/http.js';
 import { authenticate, tenantScope, requireTenant, requirePermission } from '../middleware/auth.js';
 import { PERMISSIONS } from '../utils/rbac.js';
 import { getOpenAI, MODEL } from '../ai/openai.js';
+import { emitToTenant } from '../realtime/io.js';
 
 const router = Router();
 router.use(authenticate, tenantScope, requireTenant);
@@ -146,10 +147,12 @@ REGOLE:
       }
     } catch { /* lo snapshot non deve bloccare l'applicazione */ }
 
-    await prisma.agent.update({
+    const updatedAgent = await prisma.agent.update({
       where: { id: agent.id },
       data: { [field]: updatedPrompt },
     });
+    // Notifica la dashboard così la pagina Addestramento mostra subito il prompt aggiornato.
+    try { emitToTenant(req.tenantId, 'agent:updated', { agent: updatedAgent }); } catch {}
   } else {
     await prisma.trainingConfig.update({
       where: { tenantId: req.tenantId },

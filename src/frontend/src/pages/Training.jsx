@@ -388,14 +388,39 @@ function AgentWizard({ agent, onBack, onAgentSaved }) {
     try { const r = await api(`/agents/${agent.id}/versions`); setVersions(r.versions || []); } catch {}
   }, [agent.id]);
 
+  // Carica la configurazione COMPLETA dell'agente (la lista /agents non include i prompt).
+  // Così gli step mostrano sempre il testo aggiornato, anche dopo modifiche dalla chat di addestramento.
+  const loadAgentConfig = useCallback(async () => {
+    try {
+      const { agent: full } = await api(`/agents/${agent.id}`);
+      if (full) {
+        setForm({
+          mainPrompt: full.mainPrompt || '', personality: full.personality || '',
+          rules: full.rules || '', context: full.context || '', instructions: full.instructions || '',
+        });
+      }
+    } catch {}
+  }, [agent.id]);
+
   useEffect(() => {
+    loadAgentConfig();
     loadVersions();
     api('/modules').then(({ modules: m }) => {
       setModules(m);
       setGeminiEnabled(!!(m.find(x => x.key === 'gemini')?.enabled && m.find(x => x.key === 'gemini')?.installed));
     }).catch(() => {});
     api('/training-docs').then(({ documents }) => setTrainingDocs(documents)).catch(() => {});
-  }, [loadVersions]);
+  }, [loadAgentConfig, loadVersions]);
+
+  // Ricarica la configurazione quando l'agente viene aggiornato altrove (es. chat di addestramento).
+  useEffect(() => {
+    const onUpdated = (e) => {
+      const updated = e.detail?.agent;
+      if (updated?.id === agent.id) { loadAgentConfig(); loadVersions(); }
+    };
+    window.addEventListener('sophia:agent:updated', onUpdated);
+    return () => window.removeEventListener('sophia:agent:updated', onUpdated);
+  }, [agent.id, loadAgentConfig, loadVersions]);
 
   const saveWithNote = async (note) => {
     setSaving(true); setSaved(false);
@@ -484,7 +509,7 @@ function AgentWizard({ agent, onBack, onAgentSaved }) {
   );
 }
 
-// ── Lista agenti ──────────────────────────────────────────────────────────────
+// ── Lista agenti ────────────��─────────────────────────────────────────────────
 export default function Training() {
   const toast = useToast();
   const modal = useModal();
