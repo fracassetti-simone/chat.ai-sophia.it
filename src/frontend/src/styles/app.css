@@ -212,7 +212,7 @@
 .feature-toggles  { display: flex; flex-direction: column; gap: 4px; }
 .toggle-row       { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 14px; }
 .snippet-box      { background: var(--gray-900); color: #e2e8f0; padding: 14px; border-radius: var(--radius-sm); font-family: var(--mono); font-size: 12px; overflow-x: auto; margin: 12px 0; }
-.widget-preview   { margin-top: 20px; display: flex; justify-content: flex-end; }
+.widget-preview   { margin-top: 20px; }
 .widget-bubble    { width: 240px; border-radius: 14px; overflow: hidden; box-shadow: var(--shadow); }
 .widget-header    { color: #fff; padding: 12px 14px; font-weight: 600; font-size: 14px; }
 .widget-body      { background: var(--surface); padding: 14px; min-height: 90px; }
@@ -933,7 +933,7 @@
 .logo-preview-row { display: flex; align-items: center; gap: 12px; }
 .logo-preview-img { height: 44px; width: auto; max-width: 120px; border-radius: 6px; border: 1px solid var(--border); object-fit: contain; padding: 4px; }
 .widget-preview-stage {
-  position: relative; min-height: 380px; padding: 20px;
+  position: relative; width: 100%; min-height: 380px; padding: 20px;
   background:
     radial-gradient(circle at 1px 1px, rgba(0,0,0,.05) 1px, transparent 0) 0 0 / 18px 18px,
     var(--gray-50);

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { KeyRound, Plus, RefreshCw, Trash2, Copy, X, ShieldCheck } from 'lucide-react';
+import { KeyRound, Plus, RefreshCw, Trash2, Copy, X, ShieldCheck, ShieldAlert, Ban } from 'lucide-react';
 import { api } from '../lib/api.js';
 import { useToast } from '../context/ToastContext.jsx';
 import { useModal } from '../context/ModalContext.jsx';
@@ -44,6 +44,8 @@ export default function ApiKeys() {
 
   return (
     <div>
+      <SuperTokens />
+
       <div className="page-head-row">
         <div>
           <h1 className="page-title">API Key</h1>
@@ -120,6 +122,128 @@ export default function ApiKeys() {
             <div className="modal-foot">
               <button className="btn btn-ghost" onClick={() => setCreating(false)}>Annulla</button>
               <button className="btn btn-primary" onClick={create}>Genera chiave</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Super token API: accesso trasversale a tutti i tenant (solo super admin) ──
+function SuperTokens() {
+  const toast = useToast();
+  const modal = useModal();
+  const [tokens, setTokens] = useState(null);
+  const [secret, setSecret] = useState(null);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState('');
+
+  const load = () => api('/super-tokens').then(({ tokens }) => setTokens(tokens)).catch(() => setTokens([]));
+  useEffect(() => { load(); }, []);
+
+  const create = async () => {
+    if (!name.trim()) return toast.error('Indica un nome per il super token');
+    try {
+      const { secret } = await api('/super-tokens', { method: 'POST', body: { name: name.trim() } });
+      setSecret(secret);
+      setName('');
+      setCreating(false);
+      load();
+    } catch (err) { toast.error(err.message); }
+  };
+
+  const revoke = async (t) => {
+    const ok = await modal.confirm(`Revocare il super token "${t.name}"? Smetterà di funzionare immediatamente.`, { danger: true });
+    if (!ok) return;
+    await api(`/super-tokens/${t.id}/revoke`, { method: 'POST' });
+    toast.info('Super token revocato');
+    load();
+  };
+
+  const remove = async (t) => {
+    const ok = await modal.confirm(`Eliminare definitivamente il super token "${t.name}"?`, { danger: true });
+    if (!ok) return;
+    await api(`/super-tokens/${t.id}`, { method: 'DELETE' });
+    load();
+  };
+
+  if (!tokens) return null;
+
+  return (
+    <div className="card panel" style={{ borderColor: 'var(--danger, #dc2626)', marginBottom: 24 }}>
+      <div className="page-head-row" style={{ marginBottom: 12 }}>
+        <div>
+          <h2 className="panel-title" style={{ fontSize: 16 }}>
+            <ShieldAlert size={18} style={{ color: 'var(--danger, #dc2626)' }} /> Super token API
+          </h2>
+          <p className="page-subtitle" style={{ margin: '4px 0 0' }}>
+            Accesso a livello di piattaforma: chiama qualsiasi endpoint di qualsiasi azienda.
+            Riservato ai Super Admin. Trattalo come una password root.
+          </p>
+        </div>
+        <button className="btn btn-primary" onClick={() => setCreating(true)}>
+          <Plus size={16} /> Genera super token
+        </button>
+      </div>
+
+      {secret && (
+        <div className="secret-banner card" style={{ marginBottom: 12 }}>
+          <ShieldCheck size={20} className="secret-icon" />
+          <div className="secret-body">
+            <strong>Copia il super token adesso — non sarà più mostrato.</strong>
+            <code className="secret-code">{secret}</code>
+          </div>
+          <button className="btn btn-outline" onClick={() => { navigator.clipboard.writeText(secret); toast.info('Copiato'); }}>
+            <Copy size={15} /> Copia
+          </button>
+          <button className="btn btn-ghost icon-btn" onClick={() => setSecret(null)}><X size={16} /></button>
+        </div>
+      )}
+
+      {tokens.length === 0 ? (
+        <p className="page-subtitle" style={{ margin: 0 }}>Nessun super token generato.</p>
+      ) : (
+        <div className="table-card" style={{ marginTop: 4 }}>
+          <table className="data-table">
+            <thead><tr><th>Nome</th><th>Token</th><th>Ultima attività</th><th>Stato</th><th></th></tr></thead>
+            <tbody>
+              {tokens.map((t) => (
+                <tr key={t.id}>
+                  <td><span className="cell-strong"><ShieldAlert size={15} /> {t.name}</span></td>
+                  <td><code className="key-prefix">{t.prefix}…</code></td>
+                  <td>{t.lastUsedAt ? new Date(t.lastUsedAt).toLocaleString('it-IT') : 'Mai usato'}</td>
+                  <td>
+                    <span className={`badge ${t.revokedAt ? 'badge-off' : 'badge-on'}`}>
+                      {t.revokedAt ? 'Revocato' : 'Attivo'}
+                    </span>
+                  </td>
+                  <td className="row-actions">
+                    {!t.revokedAt && (
+                      <button className="btn btn-ghost icon-btn" title="Revoca" onClick={() => revoke(t)}><Ban size={16} /></button>
+                    )}
+                    <button className="btn btn-danger icon-btn" title="Elimina" onClick={() => remove(t)}><Trash2 size={16} /></button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {creating && (
+        <div className="modal-backdrop" onClick={() => setCreating(false)}>
+          <div className="modal card" onClick={(e) => e.stopPropagation()}>
+            <h2 className="modal-title"><ShieldAlert size={18} /> Nuovo super token</h2>
+            <p className="page-subtitle" style={{ marginTop: 0 }}>
+              Questo token bypassa l'isolamento tra aziende. Conservalo in modo sicuro.
+            </p>
+            <div className="field"><label>Nome</label>
+              <input className="input" value={name} placeholder="Es. Integrazione interna / backup"
+                onChange={(e) => setName(e.target.value)} /></div>
+            <div className="modal-foot">
+              <button className="btn btn-ghost" onClick={() => setCreating(false)}>Annulla</button>
+              <button className="btn btn-primary" onClick={create}>Genera super token</button>
             </div>
           </div>
         </div>

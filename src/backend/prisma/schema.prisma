@@ -196,7 +196,7 @@ model ModuleInstance {
 
 // ─────────────────────────────────────────────────────────────
 // Modulo "Connetti API": registro endpoint utilizzabili dall'AI
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────��────────────────────────────────────
 
 enum HttpMethod {
   GET
@@ -294,6 +294,22 @@ model ApiKey {
   createdAt   DateTime  @default(now())
 
   @@index([tenantId])
+}
+
+// Super token API: chiave a livello di piattaforma, NON legata ad alcun tenant.
+// Autentica come Super Admin di sistema e consente di chiamare qualsiasi
+// endpoint di qualsiasi tenant (selezionando il tenant con l'header X-Tenant-Id).
+// Generabile, visualizzabile e revocabile solo dai Super Admin.
+model SuperApiToken {
+  id          String    @id @default(cuid())
+  name        String
+  // Mostrato una sola volta in chiaro alla creazione; in DB solo l'hash.
+  keyHash     String    @unique
+  prefix      String // primi caratteri, per riconoscimento in lista
+  createdById String? // utente super admin che l'ha generato (storico)
+  lastUsedAt  DateTime?
+  revokedAt   DateTime? // se valorizzato, il token è revocato
+  createdAt   DateTime  @default(now())
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -397,7 +413,7 @@ model WhatsAppContact {
   @@index([tenantId])
 }
 
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────���────────────────────
 // Collegamento numero di telefono utente (OTP via ai-sophia)
 // ───────────────────────────────────────────────────────�������─────
 

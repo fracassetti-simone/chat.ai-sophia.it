@@ -78,15 +78,17 @@ export default function Shell() {
             </div>
           )}
 
-          {/* ── Clienti e dati (admin + super) ── */}
-          {!isMember && (isSuper ? hasTenant : true) && (
+          {/* ── Clienti e dati ── */}
+          {/* Rubrica e Cloud sono visibili a tutti i ruoli (anche MEMBER). */}
+          {/* Calendario, Email e Moduli PDF restano riservati ad admin + super. */}
+          {(isSuper ? hasTenant : true) && (
             <div className="nav-section">
               <div className="nav-section-label">Clienti e dati</div>
               <NavLink to="/contacts"  className="nav-item"><BookUser size={17} strokeWidth={1.75}/><span>Rubrica</span></NavLink>
               <NavLink to="/cloud"     className="nav-item"><FolderClosed size={17} strokeWidth={1.75}/><span>Cloud</span></NavLink>
-              <NavLink to="/calendar"  className="nav-item"><Calendar size={17} strokeWidth={1.75}/><span>Calendario</span></NavLink>
-              <NavLink to="/email"     className="nav-item"><Mail size={17} strokeWidth={1.75}/><span>Email</span></NavLink>
-              <NavLink to="/compiler"  className="nav-item"><FileText size={17} strokeWidth={1.75}/><span>Moduli PDF</span></NavLink>
+              {!isMember && <NavLink to="/calendar"  className="nav-item"><Calendar size={17} strokeWidth={1.75}/><span>Calendario</span></NavLink>}
+              {!isMember && <NavLink to="/email"     className="nav-item"><Mail size={17} strokeWidth={1.75}/><span>Email</span></NavLink>}
+              {!isMember && <NavLink to="/compiler"  className="nav-item"><FileText size={17} strokeWidth={1.75}/><span>Moduli PDF</span></NavLink>}
             </div>
           )}
 
@@ -140,11 +142,12 @@ export default function Shell() {
             </div>
           )}
 
-          {/* ── Credenziali SIP: super admin + admin (sempre visibile, a prescindere da config-manage) ── */}
-          {(isSuper || isAdmin) && !isMember && (isSuper ? hasTenant : true) && (
+          {/* ── Numeri di telefono: visibile solo se il modulo "Telefonico" è attivo ── */}
+          {/* Super admin la vede sempre (per configurare); l'admin solo col modulo attivo. */}
+          {(isSuper || (isAdmin && enabledModules.has('telefonico'))) && !isMember && (isSuper ? hasTenant : true) && (
             <div className="nav-section">
               <div className="nav-section-label">Telefonia</div>
-              <NavLink to="/sip" className="nav-item"><Phone size={17} strokeWidth={1.75}/><span>Credenziali SIP</span></NavLink>
+              <NavLink to="/sip" className="nav-item"><Phone size={17} strokeWidth={1.75}/><span>Numeri di telefono</span></NavLink>
             </div>
           )}
 
