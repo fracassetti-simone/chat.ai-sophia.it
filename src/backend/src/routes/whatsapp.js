@@ -181,7 +181,7 @@ router.get('/media/:waMediaId', asyncHandler(async (req, res) => {
   res.send(cached.data);
 }));
 
-// ── Webhook pubblico ────────────────────────────────────────────────────────
+// ── Webhook pubblico ───────��────────────────────────────────────────────────
 
 router.get('/webhook', asyncHandler(async (req, res) => {
   const mode      = req.query['hub.mode'];
@@ -291,6 +291,7 @@ router.post('/webhook', asyncHandler(async (req, res) => {
             }
 
             let aiText = '';
+            let waContactId = null; // id del contatto WhatsApp, per l'accesso "utente del contatto" nel cloud
             try {
               let contactContext = `Stai parlando su WhatsApp con il numero ${phone}.`;
               let savedDocUrls = [];
@@ -299,6 +300,7 @@ router.post('/webhook', asyncHandler(async (req, res) => {
                 if (!contact) {
                   contact = await prisma.contact.create({ data: { tenantId, phone, source: 'whatsapp' } });
                 }
+                waContactId = contact.id;
 
                 // Salva automaticamente i media WA nel cloud del contatto
                 for (const att of attachments || []) {
@@ -358,7 +360,7 @@ router.post('/webhook', asyncHandler(async (req, res) => {
               // Carica l'agente attivo per questa chat
               const chatAgentRow = await prisma.externalChatAgent.findUnique({ where: { chatId: chat.id }, select: { agentId: true } }).catch(() => null);
               const activeAgentId = chatAgentRow?.agentId || null;
-              await runChat({ tenantId, source: 'WHATSAPP', extraContext: contactContext, agentId: activeAgentId, externalChatId: chat.id, history: enrichedHistory, onToken: (t) => { aiText += t; } });
+              await runChat({ tenantId, source: 'WHATSAPP', extraContext: contactContext, agentId: activeAgentId, externalChatId: chat.id, externalContactId: waContactId, history: enrichedHistory, onToken: (t) => { aiText += t; } });
             } catch (err) { logger.error({ err }, 'WA external: AI error'); }
 
             if (aiText) {

@@ -6,7 +6,7 @@
  *  + accessUsers: string[] (id utenti) quando è presente l'audience 'selected'.
  */
 import { useEffect, useState } from 'react';
-import { Check, Lock, Users, UserCheck, Globe, Search, X } from 'lucide-react';
+import { Check, Lock, Users, UserCheck, Globe, Search, X, UserRound } from 'lucide-react';
 import { api } from '../lib/api.js';
 
 export const AUDIENCES = [
@@ -16,12 +16,19 @@ export const AUDIENCES = [
   { value: 'external', label: 'Utenti esterni',   icon: Globe,     hint: 'Utenti del widget e dei canali esterni' },
 ];
 
+// Audience speciale, disponibile solo per le cartelle collegate a un contatto:
+// il contatto stesso, autenticato dal proprio numero di telefono su WhatsApp.
+export const CONTACT_AUDIENCE = {
+  value: 'contact', label: 'Utente del contatto', icon: UserRound,
+  hint: 'Il contatto collegato, autenticato dal suo numero su WhatsApp',
+};
+
 export const PERMISSIONS = [
   { value: 'read',  label: 'Sola lettura' },
   { value: 'write', label: 'Tutto' },
 ];
 
-export const AUD_META = Object.fromEntries(AUDIENCES.map(a => [a.value, a]));
+export const AUD_META = Object.fromEntries([...AUDIENCES, CONTACT_AUDIENCE].map(a => [a.value, a]));
 
 // Normalizza un array di accesso, mantenendo solo audience valide.
 export function getAccess(obj) {
@@ -40,6 +47,7 @@ export function AccessBadge({ access }) {
     users:    { bg: '#eff6ff', color: '#1d4ed8' },
     selected: { bg: '#faf5ff', color: '#7e22ce' },
     external: { bg: '#ecfdf5', color: '#047857' },
+    contact:  { bg: '#fff7ed', color: '#c2410c' },
   };
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
@@ -60,9 +68,10 @@ export function AccessBadge({ access }) {
 }
 
 // ─── MultiAccessPicker — selezione multipla audience + permesso ───────────────
-export function MultiAccessPicker({ value, onChange, label = 'Accessibile a', hint }) {
+export function MultiAccessPicker({ value, onChange, label = 'Accessibile a', hint, showContact = false }) {
   const list = Array.isArray(value) ? value : [];
   const entryFor = aud => list.find(v => v.audience === aud);
+  const audiences = showContact ? [...AUDIENCES, CONTACT_AUDIENCE] : AUDIENCES;
 
   const toggle = aud => {
     if (entryFor(aud)) onChange(list.filter(v => v.audience !== aud));
@@ -77,7 +86,7 @@ export function MultiAccessPicker({ value, onChange, label = 'Accessibile a', hi
         {hint || 'Seleziona uno o più destinatari e, per ciascuno, il livello di permesso.'}
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        {AUDIENCES.map(a => {
+        {audiences.map(a => {
           const entry = entryFor(a.value);
           const sel = !!entry;
           const Icon = a.icon;
@@ -212,7 +221,7 @@ export function UserPicker({ selected, onChange, endpoint = '/db/users' }) {
 }
 
 // ─── FolderAccessModal — crea/modifica cartella con controllo accessi ─────────
-export function FolderAccessModal({ title, initialName = '', initialAccess, initialAccessUsers = [], onSave, onClose }) {
+export function FolderAccessModal({ title, initialName = '', initialAccess, initialAccessUsers = [], isContact = false, onSave, onClose }) {
   const [name, setName] = useState(initialName);
   const [access, setAccess] = useState(
     Array.isArray(initialAccess) && initialAccess.length
@@ -246,7 +255,10 @@ export function FolderAccessModal({ title, initialName = '', initialAccess, init
               onKeyDown={e => { if (e.key === 'Enter') save(); }} />
           </div>
           <MultiAccessPicker value={access} onChange={setAccess} label="Chi può accedere a questa cartella"
-            hint="Gli admin hanno sempre accesso completo. Seleziona altri destinatari e il loro livello di permesso." />
+            showContact={isContact}
+            hint={isContact
+              ? 'Gli admin hanno sempre accesso completo. "Utente del contatto" consente al contatto di vedere i propri file via WhatsApp.'
+              : 'Gli admin hanno sempre accesso completo. Seleziona altri destinatari e il loro livello di permesso.'} />
           {hasSelected && (
             <div>
               <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 12 }}>Utenti specifici</div>

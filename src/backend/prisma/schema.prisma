@@ -28,6 +28,11 @@ model Tenant {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // Accesso predefinito applicato alle cartelle documentali collegate a un contatto.
+  // Array JSON di { audience, permission }. Vuoto = usa il default di sistema
+  // (admin+utenti completo, utenti esterni no, utente del contatto in lettura).
+  cloudFolderDefaults Json @default("[]")
+
   users         User[]
   conversations Conversation[]
   training      TrainingConfig?
@@ -394,7 +399,7 @@ model WhatsAppContact {
 
 // ─────────────────────────────────────────────────────────────
 // Collegamento numero di telefono utente (OTP via ai-sophia)
-// ───────────────────────────────────────────────────────�����─────
+// ───────────────────────────────────────────────────────�������─────
 
 model UserPhoneLink {
   id          String   @id @default(cuid())
@@ -744,7 +749,7 @@ model CalendarEvent {
   @@index([calendarId, startAt])
 }
 
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────��────────────────
 // Modulo Email — account IMAP/SMTP, conversazioni, messaggi
 // ─────────────────────────────────────────────────────────────
 

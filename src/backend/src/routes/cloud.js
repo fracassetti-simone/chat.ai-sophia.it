@@ -11,8 +11,23 @@ const router = Router();
 router.use(authenticate, tenantScope, requireTenant);
 
 // ── Modello di accesso multi-audience (allineato a routes/db.js) ──────────────
-const AUDIENCES   = ['admin', 'users', 'selected', 'external'];
+// 'contact' = l'utente del contatto a cui è collegata la cartella, autenticato
+// dal proprio numero di telefono su un canale esterno (es. WhatsApp).
+const AUDIENCES   = ['admin', 'users', 'selected', 'external', 'contact'];
 const PERMISSIONS = ['read', 'write'];
+
+// Default di sistema per le cartelle collegate a un contatto:
+// admin + utenti completo, utenti esterni no, utente del contatto in lettura.
+const CONTACT_FOLDER_DEFAULT = [
+  { audience: 'admin',   permission: 'write' },
+  { audience: 'users',   permission: 'write' },
+  { audience: 'contact', permission: 'read'  },
+];
+// Default retro-compatibile per cartelle NON collegate a un contatto.
+const GENERIC_FOLDER_DEFAULT = [
+  { audience: 'admin', permission: 'write' },
+  { audience: 'users', permission: 'write' },
+];
 
 function isSuperAdmin(req) { return req.user?.role === 'SUPER_ADMIN'; }
 function isAdmin(req)      { return req.user?.role === 'ADMIN' || isSuperAdmin(req); }
@@ -38,13 +53,25 @@ function normalizeAccess(raw) {
   return out;
 }
 
-/** Array di accesso effettivo. Vuoto/legacy → accessibile a tutti gli utenti del tenant. */
-function getAccess(folder) {
+/** Restituisce il default per le cartelle-contatto, applicando l'override del tenant se presente. */
+function contactFolderDefault(tenant) {
+  const raw = tenant?.cloudFolderDefaults;
+  if (Array.isArray(raw) && raw.length) {
+    return normalizeAccess(raw);
+  }
+  return CONTACT_FOLDER_DEFAULT;
+}
+
+/** Array di accesso effettivo di una cartella.
+ *  - access esplicito → usalo
+ *  - cartella-contatto senza access → default contatto (con override tenant)
+ *  - altrimenti → default generico (admin + utenti) */
+function getAccess(folder, tenant = null) {
   if (Array.isArray(folder?.access) && folder.access.length) {
     return folder.access.filter(a => a && AUDIENCES.includes(a.audience));
   }
-  // Default retro-compatibile: cartelle senza modello di accesso sono visibili a tutti.
-  return [{ audience: 'admin', permission: 'write' }, { audience: 'users', permission: 'write' }];
+  if (folder?.contactId) return contactFolderDefault(tenant);
+  return GENERIC_FOLDER_DEFAULT;
 }
 
 function userAudiences(req) {
@@ -52,18 +79,29 @@ function userAudiences(req) {
   return ['users'];
 }
 
+/** Carica (e memoizza su req) i dati del tenant utili per gli accessi cloud. */
+async function getTenant(req) {
+  if (req._cloudTenant !== undefined) return req._cloudTenant;
+  req._cloudTenant = await prisma.tenant.findUnique({
+    where: { id: req.tenantId },
+    select: { cloudFolderDefaults: true },
+  }).catch(() => null);
+  return req._cloudTenant;
+}
+
 /** Permesso dell'utente su una cartella: 'write' | 'read' | null. Super admin → 'write'. */
-function permissionFor(req, folder) {
+function permissionFor(req, folder, tenant = null) {
   if (isSuperAdmin(req)) return 'write';
-  // Le cartelle-contatto restano gestibili dagli utenti come prima (nessuna restrizione extra).
-  const access = getAccess(folder);
+  const access = getAccess(folder, tenant);
   const auds = userAudiences(req);
   const selUsers = Array.isArray(folder?.accessUsers) ? folder.accessUsers : [];
   let best = null;
   for (const a of access) {
     let match = false;
     if (a.audience === 'selected') match = selUsers.includes(req.user.id);
-    else if (a.audience === 'external') match = false;
+    // 'external' e 'contact' riguardano i canali esterni autenticati dal telefono,
+    // non lo staff interno che usa la dashboard.
+    else if (a.audience === 'external' || a.audience === 'contact') match = false;
     else match = auds.includes(a.audience);
     if (!match) continue;
     if (a.permission === 'write') return 'write';
@@ -72,15 +110,16 @@ function permissionFor(req, folder) {
   return best;
 }
 
-function canSee(req, folder)   { return permissionFor(req, folder) != null; }
-function canWrite(req, folder) { return permissionFor(req, folder) === 'write'; }
+function canSee(req, folder, tenant)   { return permissionFor(req, folder, tenant) != null; }
+function canWrite(req, folder, tenant) { return permissionFor(req, folder, tenant) === 'write'; }
 
 /** Carica una cartella e verifica l'accesso. Lancia 404/403 dove serve. */
 async function loadFolder(req, id, { write = false } = {}) {
   const folder = await prisma.cloudFolder.findFirst({ where: { id, tenantId: req.tenantId } });
   if (!folder) throw notFound('Cartella non trovata');
-  if (!canSee(req, folder)) throw forbidden('Non hai accesso a questa cartella.');
-  if (write && !canWrite(req, folder)) throw forbidden('Non hai il permesso di modificare questa cartella.');
+  const tenant = await getTenant(req);
+  if (!canSee(req, folder, tenant)) throw forbidden('Non hai accesso a questa cartella.');
+  if (write && !canWrite(req, folder, tenant)) throw forbidden('Non hai il permesso di modificare questa cartella.');
   return folder;
 }
 
@@ -161,14 +200,15 @@ router.get('/', asyncHandler(async (req, res) => {
     }),
   ]);
 
+  const tenant = await getTenant(req);
   res.json({
-    folder: current ? { id: current.id, name: current.name, contactId: current.contactId, access: getAccess(current), accessUsers: current.accessUsers || [], canWrite: canWrite(req, current) } : null,
+    folder: current ? { id: current.id, name: current.name, contactId: current.contactId, isContact: !!current.contactId, access: getAccess(current, tenant), accessUsers: current.accessUsers || [], canWrite: canWrite(req, current, tenant) } : null,
     breadcrumb: folderId ? await breadcrumb(req.tenantId, folderId) : [],
     // Mostra solo le sottocartelle a cui l'utente ha accesso.
-    folders: folders.filter((f) => canSee(req, f)).map((f) => ({
-      id: f.id, name: f.name, isContact: !!f.contactId,
+    folders: folders.filter((f) => canSee(req, f, tenant)).map((f) => ({
+      id: f.id, name: f.name, isContact: !!f.contactId, contactId: f.contactId || null,
       itemCount: f._count.documents + f._count.children,
-      access: getAccess(f), accessUsers: f.accessUsers || [], canWrite: canWrite(req, f),
+      access: getAccess(f, tenant), accessUsers: f.accessUsers || [], canWrite: canWrite(req, f, tenant),
     })),
     files: files.map((d) => fileView(req, d)),
   });
@@ -362,6 +402,7 @@ router.get('/search', asyncHandler(async (req, res) => {
   // Filtra i risultati: nascondi i file che si trovano in cartelle non accessibili.
   let visible = files;
   if (!isSuperAdmin(req)) {
+    const tenant = await getTenant(req);
     const folderIds = [...new Set(files.map((d) => d.folderId).filter(Boolean))];
     const accessById = new Map();
     if (folderIds.length) {
@@ -374,7 +415,7 @@ router.get('/search', asyncHandler(async (req, res) => {
     visible = files.filter((d) => {
       if (!d.folderId) return true; // file nella root: visibile
       const f = accessById.get(d.folderId);
-      return f ? canSee(req, f) : true;
+      return f ? canSee(req, f, tenant) : true;
     });
   }
 
@@ -392,6 +433,23 @@ router.get('/users', asyncHandler(async (req, res) => {
   res.json({ users });
 }));
 
+// ── GET /api/cloud/settings (accesso predefinito cartelle-contatto) ───────────
+router.get('/settings', asyncHandler(async (req, res) => {
+  if (!isAdmin(req)) throw forbidden('Permesso negato');
+  const tenant = await getTenant(req);
+  res.json({ contactFolderDefault: contactFolderDefault(tenant), systemDefault: CONTACT_FOLDER_DEFAULT });
+}));
+
+// ── PUT /api/cloud/settings (solo admin/super admin) ─────────────────────────
+router.put('/settings', asyncHandler(async (req, res) => {
+  if (!isAdmin(req)) throw forbidden('Solo gli amministratori possono modificare le impostazioni predefinite.');
+  const access = accessSchema.parse(req.body?.contactFolderDefault);
+  const norm = normalizeAccess(access);
+  await prisma.tenant.update({ where: { id: req.tenantId }, data: { cloudFolderDefaults: norm } });
+  req._cloudTenant = { cloudFolderDefaults: norm };
+  res.json({ ok: true, contactFolderDefault: norm });
+}));
+
 // ── POST /api/cloud/contact/:contactId/folder ─────────────────────────────
 router.post('/contact/:contactId/folder', asyncHandler(async (req, res) => {
   const contact = await prisma.contact.findFirst({ where: { id: req.params.contactId, tenantId: req.tenantId } });
@@ -400,8 +458,10 @@ router.post('/contact/:contactId/folder', asyncHandler(async (req, res) => {
   let folder = await prisma.cloudFolder.findUnique({ where: { contactId: contact.id } }).catch(() => null)
     || await prisma.cloudFolder.findFirst({ where: { tenantId: req.tenantId, contactId: contact.id } });
   if (!folder) {
+    // Applica l'accesso predefinito per le cartelle-contatto (admin+utenti, contatto in lettura).
+    const tenant = await getTenant(req);
     folder = await prisma.cloudFolder.create({
-      data: { tenantId: req.tenantId, name: displayName(contact), contactId: contact.id, parentId: null },
+      data: { tenantId: req.tenantId, name: displayName(contact), contactId: contact.id, parentId: null, access: contactFolderDefault(tenant) },
     });
   }
   res.json({ folderId: folder.id, name: folder.name });

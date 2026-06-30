@@ -3,12 +3,13 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   FolderPlus, Upload, Search, Home, ChevronRight, Folder, FolderOpen, Trash2,
   Download, Pencil, X, FileText, Image as ImageIcon, File as FileIcon, UserRound,
-  FolderInput, Move,
+  FolderInput, Move, Settings,
 } from 'lucide-react';
 import { api, uploadFileWithProgress } from '../lib/api.js';
 import { useToast } from '../context/ToastContext.jsx';
 import { useModal } from '../context/ModalContext.jsx';
-import { FolderAccessModal, AccessBadge } from '../components/AccessControl.jsx';
+import { useAuth } from '../context/AuthContext.jsx';
+import { FolderAccessModal, AccessBadge, MultiAccessPicker } from '../components/AccessControl.jsx';
 
 // ── helpers ────────────────────────────────────────────────────────────────
 function formatSize(b) {
@@ -91,8 +92,11 @@ function MovePicker({ tenantFolders, current, onSelect, onClose }) {
 export default function Cloud() {
   const toast = useToast();
   const modal = useModal();
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'ADMIN' || user?.role === 'SUPER_ADMIN';
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Inizializza folderId da ?folder= oppure lo risolve da ?contactId= una volta sola
   const [folderId, setFolderId] = useState(searchParams.get('folder') || null);
@@ -223,10 +227,14 @@ export default function Cloud() {
   const folderCtx = (e, f) => {
     e.preventDefault(); e.stopPropagation();
     const items = [{ label:'Apri', icon:FolderOpen, onClick:()=>setFolderId(f.id) }];
-    if (f.canWrite !== false && !f.isContact) {
-      items.push({ label:'Rinomina e permessi', icon:Pencil, onClick:()=>editFolder(f) });
-      items.push('sep');
-      items.push({ label:'Elimina', icon:Trash2, danger:true, onClick:()=>deleteFolder(f) });
+    if (f.canWrite !== false) {
+      // I permessi sono modificabili su QUALSIASI cartella (incluse quelle dei contatti).
+      items.push({ label: f.isContact ? 'Permessi' : 'Rinomina e permessi', icon:Pencil, onClick:()=>editFolder(f) });
+      // L'eliminazione resta disponibile solo per le cartelle non collegate a un contatto.
+      if (!f.isContact) {
+        items.push('sep');
+        items.push({ label:'Elimina', icon:Trash2, danger:true, onClick:()=>deleteFolder(f) });
+      }
     }
     setCtxMenu({ x:e.clientX, y:e.clientY, items });
   };
@@ -264,6 +272,9 @@ export default function Cloud() {
         <div><h1 className="page-title">Cloud documentale</h1>
           <p className="page-subtitle">Tasto destro su file e cartelle per azioni rapide. Trascina i file sulle cartelle per spostarli.</p></div>
         <div className="cloud-actions">
+          {isAdmin && (
+            <button className="btn btn-outline" onClick={()=>setSettingsOpen(true)} title="Permessi predefiniti cartelle contatto"><Settings size={16}/> Impostazioni</button>
+          )}
           <button className="btn btn-outline" onClick={newFolder} disabled={!canWriteHere}><FolderPlus size={16}/> Nuova cartella</button>
           <button className="btn btn-primary" onClick={()=>fileInput.current?.click()} disabled={uploading||!canWriteHere}><Upload size={16}/> {uploading?'Carico…':'Carica file'}</button>
           <input ref={fileInput} type="file" multiple hidden onChange={onUpload}/>
@@ -317,14 +328,14 @@ export default function Cloud() {
                    <div className="folder-meta">
                      <span className="folder-name">{f.name}</span>
                      <span className="folder-count">{f.itemCount} element{f.itemCount===1?'o':'i'}</span>
-                     {!f.isContact && f.access && (
+                     {f.access && (
                        <div className="folder-access" style={{marginTop:6}}><AccessBadge access={f.access}/></div>
                      )}
                    </div>
-                   {!f.isContact && f.canWrite !== false && (
+                   {f.canWrite !== false && (
                      <div className="folder-tools" onClick={e=>e.stopPropagation()}>
-                       <button className="icon-btn-sm" title="Rinomina e permessi" onClick={()=>editFolder(f)}><Pencil size={14}/></button>
-                       <button className="icon-btn-sm danger" title="Elimina" onClick={()=>deleteFolder(f)}><Trash2 size={14}/></button>
+                       <button className="icon-btn-sm" title={f.isContact ? 'Permessi' : 'Rinomina e permessi'} onClick={()=>editFolder(f)}><Pencil size={14}/></button>
+                       {!f.isContact && <button className="icon-btn-sm danger" title="Elimina" onClick={()=>deleteFolder(f)}><Trash2 size={14}/></button>}
                      </div>
                    )}
                  </div>
@@ -364,14 +375,61 @@ export default function Cloud() {
       )}
       {folderModal && (
         <FolderAccessModal
-          title={folderModal.mode === 'edit' ? 'Rinomina e permessi' : 'Nuova cartella'}
+          title={folderModal.mode === 'edit' ? (folderModal.folder?.isContact ? 'Permessi cartella' : 'Rinomina e permessi') : 'Nuova cartella'}
           initialName={folderModal.folder?.name || ''}
           initialAccess={folderModal.folder?.access}
           initialAccessUsers={folderModal.folder?.accessUsers || []}
+          isContact={!!folderModal.folder?.isContact}
           onSave={saveFolder}
           onClose={()=>setFolderModal(null)}
         />
       )}
+      {settingsOpen && (
+        <CloudSettingsModal onClose={()=>setSettingsOpen(false)} toast={toast} />
+      )}
+    </div>
+  );
+}
+
+// ── Impostazioni predefinite cartelle-contatto (solo admin) ──────────────────
+function CloudSettingsModal({ onClose, toast }) {
+  const [access, setAccess] = useState(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api('/cloud/settings')
+      .then(r => setAccess(Array.isArray(r.contactFolderDefault) ? r.contactFolderDefault : []))
+      .catch(() => setAccess([{ audience:'admin', permission:'write' }, { audience:'users', permission:'write' }, { audience:'contact', permission:'read' }]));
+  }, []);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api('/cloud/settings', { method:'PUT', body:{ contactFolderDefault: access } });
+      toast.info('Impostazioni predefinite salvate');
+      onClose();
+    } catch (err) { toast.error(err.message); }
+    finally { setSaving(false); }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal card" style={{ maxWidth: 480, width: '100%' }} onClick={e=>e.stopPropagation()}>
+        <div className="modal-head-row">
+          <h3 className="modal-title" style={{ margin: 0 }}>Permessi predefiniti cartelle contatto</h3>
+          <button className="btn btn-ghost icon-btn" onClick={onClose}><X size={16}/></button>
+        </div>
+        <p style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 0 }}>
+          Questi permessi vengono applicati automaticamente alle nuove cartelle documentali collegate a un contatto.
+        </p>
+        {access === null
+          ? <div className="skeleton" style={{ height: 220 }}/>
+          : <MultiAccessPicker value={access} onChange={setAccess} showContact label="Accesso predefinito" />}
+        <div style={{ display:'flex', justifyContent:'flex-end', gap:8, marginTop:18 }}>
+          <button className="btn btn-outline" onClick={onClose}>Annulla</button>
+          <button className="btn btn-primary" onClick={save} disabled={saving || access === null}>{saving ? 'Salvo…' : 'Salva'}</button>
+        </div>
+      </div>
     </div>
   );
 }

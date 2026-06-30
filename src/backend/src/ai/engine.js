@@ -24,7 +24,7 @@ const MAX_TOOL_ROUNDS = 5;
  * @param {(call:object)=>void}  opts.onToolCall    invocato quando l'AI richiede una capability (con args)
  * @param {(result:object)=>void} opts.onToolResult invocato al termine (con args + esito/risposta)
  */
-export async function runChat({ tenantId, conversationId = null, userId = null, isTraining = false, history, allow = null, source = 'CHAT', userRole = null, extraContext = null, agentId = null, agentOverride = null, externalChatId = null, onToken, onToolCall, onToolResult }) {
+export async function runChat({ tenantId, conversationId = null, userId = null, isTraining = false, history, allow = null, source = 'CHAT', userRole = null, extraContext = null, agentId = null, agentOverride = null, externalChatId = null, externalContactId = null, onToken, onToolCall, onToolResult }) {
   let openai;
   try {
     openai = getOpenAI();
@@ -36,13 +36,14 @@ export async function runChat({ tenantId, conversationId = null, userId = null, 
   const system = await buildSystemPrompt(tenantId, userId, isTraining, extraContext, agentId, agentOverride);
   const tools  = await registry.openAiTools(tenantId, allow);
 
-  // Carica il contactId dell'utente per passarlo ai tool (es. cloud find_documents)
-  let userContactId = null;
+  // Carica il contactId dell'utente per passarlo ai tool (es. cloud find_documents).
+  // Sui canali esterni autenticati dal telefono (WhatsApp) usiamo externalContactId.
+  let userContactId = externalContactId || null;
   if (userId) {
     try {
       const { prisma } = await import('../db/prisma.js');
       const profile = await prisma.userProfile.findUnique({ where: { userId }, select: { contactId: true } });
-      userContactId = profile?.contactId || null;
+      userContactId = profile?.contactId || userContactId;
     } catch {}
   }
 
@@ -134,7 +135,7 @@ export async function runChat({ tenantId, conversationId = null, userId = null, 
       } catch { parsedArgs = { _raw: t.args }; }
       onToolCall?.({ name: t.name, args: parsedArgs });
       try {
-        result = await registry.invoke(tenantId, t.name, parsedArgs, { conversationId, userId, userRole, source, userContactId, externalChatId });
+        result = await registry.invoke(tenantId, t.name, parsedArgs, { conversationId, userId, userRole, source, userContactId, externalContactId, externalChatId });
         executedToolCalls.push({ name: t.name, args: parsedArgs, ok: true, result });
         onToolResult?.({ name: t.name, args: parsedArgs, ok: true, result });
       } catch (err) {

@@ -6,14 +6,28 @@ function publicUrl(id) {
 }
 
 // ── Controllo accessi cartelle (allineato a routes/cloud.js) ──────────────────
-const AUDIENCES = ['admin', 'users', 'selected', 'external'];
+// 'contact' = l'utente del contatto collegato alla cartella, autenticato dal proprio
+// numero di telefono su un canale esterno (es. WhatsApp).
+const AUDIENCES = ['admin', 'users', 'selected', 'external', 'contact'];
+const CONTACT_FOLDER_DEFAULT = [
+  { audience: 'admin',   permission: 'write' },
+  { audience: 'users',   permission: 'write' },
+  { audience: 'contact', permission: 'read'  },
+];
+const GENERIC_FOLDER_DEFAULT = [
+  { audience: 'admin', permission: 'write' },
+  { audience: 'users', permission: 'write' },
+];
 
-function folderAccess(folder) {
+function folderAccess(folder, tenantDefaults = null) {
   if (Array.isArray(folder?.access) && folder.access.length) {
     return folder.access.filter(a => a && AUDIENCES.includes(a.audience));
   }
-  // Default retro-compatibile: visibile a tutti gli utenti del tenant.
-  return [{ audience: 'admin', permission: 'write' }, { audience: 'users', permission: 'write' }];
+  // Cartella collegata a un contatto: applica il default contatto (override tenant se presente).
+  if (folder?.contactId) {
+    return (Array.isArray(tenantDefaults) && tenantDefaults.length) ? tenantDefaults : CONTACT_FOLDER_DEFAULT;
+  }
+  return GENERIC_FOLDER_DEFAULT;
 }
 
 // La sessione è "esterna" quando l'AI opera in un canale esterno (widget / WhatsApp), non nella chat interna.
@@ -21,15 +35,24 @@ function isExternalCtx(ctx) {
   return !!ctx?.externalChatId || (!!ctx?.source && ctx.source !== 'CHAT');
 }
 
+/** Id del contatto della sessione (per l'audience 'contact'). */
+function sessionContactId(ctx) {
+  return ctx?.externalContactId || ctx?.userContactId || null;
+}
+
 /** Permesso della sessione su una cartella: 'write' | 'read' | null. */
-function sessionFolderPermission(ctx, folder) {
-  const access = folderAccess(folder);
+function sessionFolderPermission(ctx, folder, tenantDefaults = null) {
+  const access = folderAccess(folder, tenantDefaults);
   const external = isExternalCtx(ctx);
   const selUsers = Array.isArray(folder?.accessUsers) ? folder.accessUsers : [];
+  const contactId = sessionContactId(ctx);
   let best = null;
   for (const a of access) {
     let match = false;
-    if (external) {
+    if (a.audience === 'contact') {
+      // L'utente del contatto accede alla PROPRIA cartella (match sul contactId).
+      match = !!(contactId && folder?.contactId && contactId === folder.contactId);
+    } else if (external) {
       match = a.audience === 'external';
     } else if (a.audience === 'external') {
       match = false;
@@ -45,6 +68,17 @@ function sessionFolderPermission(ctx, folder) {
   return best;
 }
 
+/** Default cartelle-contatto del tenant (override) — caricato e memoizzato sul ctx. */
+async function tenantContactDefaults(ctx) {
+  if (ctx._contactDefaults !== undefined) return ctx._contactDefaults;
+  try {
+    const t = await ctx.prisma.tenant.findUnique({ where: { id: ctx.tenantId }, select: { cloudFolderDefaults: true } });
+    const raw = t?.cloudFolderDefaults;
+    ctx._contactDefaults = (Array.isArray(raw) && raw.length) ? raw : null;
+  } catch { ctx._contactDefaults = null; }
+  return ctx._contactDefaults;
+}
+
 /** Mappa folderId → folder per i documenti dati, e indica se la sessione può vederli. */
 async function buildFolderAccessMap(ctx, docs) {
   const folderIds = [...new Set(docs.map(d => d.folderId).filter(Boolean))];
@@ -52,18 +86,18 @@ async function buildFolderAccessMap(ctx, docs) {
   if (folderIds.length) {
     const folders = await ctx.prisma.cloudFolder.findMany({
       where: { tenantId: ctx.tenantId, id: { in: folderIds } },
-      select: { id: true, access: true, accessUsers: true },
+      select: { id: true, access: true, accessUsers: true, contactId: true },
     });
     for (const f of folders) map.set(f.id, f);
   }
   return map;
 }
 
-function docVisible(ctx, doc, folderMap) {
+function docVisible(ctx, doc, folderMap, tenantDefaults = null) {
   if (!doc.folderId) return true; // root → sempre visibile internamente; esterni vedono solo via cartelle dedicate
   const f = folderMap.get(doc.folderId);
   if (!f) return true;
-  return sessionFolderPermission(ctx, f) != null;
+  return sessionFolderPermission(ctx, f, tenantDefaults) != null;
 }
 
 export default defineModule({
@@ -95,8 +129,9 @@ export default defineModule({
         // Verifica permesso di scrittura sulla cartella del documento.
         const folderMap = await buildFolderAccessMap(ctx, rows);
         if (rows[0].folderId) {
+          const defaults = await tenantContactDefaults(ctx);
           const f = folderMap.get(rows[0].folderId);
-          if (f && sessionFolderPermission(ctx, f) !== 'write') {
+          if (f && sessionFolderPermission(ctx, f, defaults) !== 'write') {
             return { ok: false, message: 'Non hai il permesso di rinominare questo documento.' };
           }
         }
@@ -210,7 +245,8 @@ export default defineModule({
 
         // Nascondi i documenti che si trovano in cartelle non accessibili alla sessione.
         const folderMap = await buildFolderAccessMap(ctx, docs);
-        const visibleDocs = docs.filter(d => docVisible(ctx, d, folderMap));
+        const defaults = await tenantContactDefaults(ctx);
+        const visibleDocs = docs.filter(d => docVisible(ctx, d, folderMap, defaults));
 
         const navigateTo    = contactId ? `/cloud?contactId=${contactId}` : '/cloud';
         const navigateLabel = contactLabel

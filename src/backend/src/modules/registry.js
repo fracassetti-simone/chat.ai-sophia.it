@@ -148,7 +148,7 @@ class ModuleRegistry {
     if (!cap) throw new Error(`Capability sconosciuta: ${capabilityName}`);
 
     return cap.handler(
-      { tenantId, config: instance.config ?? {}, prisma, conversationId: extra.conversationId ?? null, userId: extra.userId ?? null, userRole: extra.userRole ?? null, source: extra.source ?? null, userContactId: extra.userContactId ?? null, externalChatId: extra.externalChatId ?? null },
+      { tenantId, config: instance.config ?? {}, prisma, conversationId: extra.conversationId ?? null, userId: extra.userId ?? null, userRole: extra.userRole ?? null, source: extra.source ?? null, userContactId: extra.userContactId ?? null, externalContactId: extra.externalContactId ?? null, externalChatId: extra.externalChatId ?? null },
       args ?? {},
     );
   }
